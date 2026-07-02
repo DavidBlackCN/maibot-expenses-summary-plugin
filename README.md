@@ -11,7 +11,7 @@
 - 支持管理员命令在线切换财报模式
 - 支持合并转发消息或普通消息发送
 - 使用 HTML 渲染图片展示累计请求次数、回复成本和各模型回复成本
-- 可选定时发送和 BGM 音频
+- 可选定时发送
 
 ## 财报模式
 
@@ -56,7 +56,7 @@
 
 ```toml
 [plugin]
-config_version = "1.0.0"
+config_version = "1.0.1"
 
 [report]
 mode = "default"
@@ -84,9 +84,7 @@ poems = [
 ]
 thanks_list = ["810", "艾斯比"]
 
-[audio]
-enabled = false
-file_location = "audio.mp3"
+# BGM 音频功能在 1.0.1 暂停启用：当前 sdk2.x 暂未提供 send.audio 能力。
 ```
 
 `report.use_forward_message = true` 时使用合并转发消息发送；设为 `false` 时会按普通消息逐条发送文本和图片。
@@ -113,6 +111,12 @@ file_location = "audio.mp3"
 统计口径：MaiBot 统计 API 的 `days` 参数表示最近 N 天数据；插件会使用小时粒度趋势数据，并按本地日期过滤为当天 0 点至当前时间，避免新的一天继续计入前一日的 24H 数据。
 
 ## 更新日志
+
+### 1.0.1
+
+- 暂停启用麦晨风模式下的 BGM 音频发送功能。
+- 移除 `send.audio` 能力声明，避免当前 sdk2.x 无该能力时加载或审查失败。
+- 从默认配置示例中移除 `[audio]` 配置节，后续 SDK 提供公共音频发送能力后再恢复。
 
 ### 1.0.0
 

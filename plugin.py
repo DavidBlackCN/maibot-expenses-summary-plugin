@@ -1,5 +1,5 @@
 """
-MaiBot 1.0.0 / sdk2.x expenses summary plugin.
+MaiBot 1.0.1 / sdk2.x expenses summary plugin.
 """
 
 from __future__ import annotations
@@ -39,7 +39,6 @@ except ImportError:  # Allows local syntax checks without the MaiBot SDK.
             self.config = kwargs.get("config")
 
 
-PLUGIN_DIR = Path(__file__).parent
 REPORT_MODE_DEFAULT = "default"
 REPORT_MODE_MAICHENFENG = "maichenfeng"
 
@@ -113,16 +112,15 @@ class FallbackConfig(PluginConfigBase):
     thanks_list: list[str] = Field(default=["810", "艾斯比"], title="感谢名单")
 
 
-class AudioConfig(PluginConfigBase):
-    enabled: bool = Field(default=False, title="启用 BGM 音频")
-    file_location: str = Field(
-        default=(PLUGIN_DIR / "audio.mp3").as_posix(),
-        title="音频文件路径",
-    )
+# BGM support is temporarily disabled in 1.0.1 because the current sdk2.x
+# public send capability does not expose send.audio.
+# class AudioConfig(PluginConfigBase):
+#     enabled: bool = Field(default=False, title="启用 BGM 音频")
+#     file_location: str = Field(default="audio.mp3", title="音频文件路径")
 
 
 class PluginMetaConfig(PluginConfigBase):
-    config_version: str = Field(default="1.0.0", title="配置文件版本")
+    config_version: str = Field(default="1.0.1", title="配置文件版本")
 
 
 class ExpensesSummaryConfig(PluginConfigBase):
@@ -131,7 +129,7 @@ class ExpensesSummaryConfig(PluginConfigBase):
     permission: PermissionConfig = Field(default_factory=PermissionConfig, title="权限")
     scheduler: SchedulerConfig = Field(default_factory=SchedulerConfig, title="定时发送")
     fallback: FallbackConfig = Field(default_factory=FallbackConfig, title="麦晨风素材")
-    audio: AudioConfig = Field(default_factory=AudioConfig, title="音频")
+    # audio: AudioConfig = Field(default_factory=AudioConfig, title="音频")
 
 
 class ExpensesSummaryPlugin(MaiBotPlugin):
@@ -275,8 +273,7 @@ class ExpensesSummaryPlugin(MaiBotPlugin):
             sent = await _send_forward(ctx, nodes, stream_id)
         else:
             sent = await _send_plain_messages(ctx, nodes, stream_id)
-        if config.audio.enabled:
-            await _try_send_audio(ctx, config.audio.file_location, stream_id)
+        # BGM is disabled until sdk2.x provides a public send.audio capability.
         return sent
 
     async def _scheduler_loop(self) -> None:
@@ -1113,19 +1110,19 @@ async def _send_image_segment(sender: Any, content: str, stream_id: str) -> bool
     return False
 
 
-async def _try_send_audio(
-    ctx: Any,
-    file_location: str,
-    stream_id: Optional[str] = None,
-) -> None:
-    sender = _get_path(ctx, "send")
-    audio = getattr(sender, "audio", None) or getattr(sender, "voice", None)
-    if callable(audio):
-        target_stream_id = stream_id or _get_stream_id(ctx)
-        try:
-            await _maybe_await(audio(file_location, stream_id=target_stream_id))
-        except TypeError:
-            await _maybe_await(audio(file_location))
+# async def _try_send_audio(
+#     ctx: Any,
+#     file_location: str,
+#     stream_id: Optional[str] = None,
+# ) -> None:
+#     sender = _get_path(ctx, "send")
+#     audio = getattr(sender, "audio", None) or getattr(sender, "voice", None)
+#     if callable(audio):
+#         target_stream_id = stream_id or _get_stream_id(ctx)
+#         try:
+#             await _maybe_await(audio(file_location, stream_id=target_stream_id))
+#         except TypeError:
+#             await _maybe_await(audio(file_location))
 
 
 async def _resolve_target_context(ctx: Any, target: str) -> Any:
