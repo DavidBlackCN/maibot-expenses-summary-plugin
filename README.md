@@ -1,59 +1,135 @@
-# expenses_summary
-一个 MaiBot 插件，让你的麦麦化身“户晨风本风”，每天用咬牙切齿的语气公开处刑自己（并顺带感谢股东）。
+# maibot-expenses-summary-plugin - 麦麦财务总结
+
+一个 MaiBot 1.0.9+ / sdk2.6.0+ 插件，使用最新版本sdk新增的 `self.ctx.statistics` 能力代理，统计当天模型调用次数、回复量和回复成本，并生成财报文本与图片。
 
 ## 功能
-- 自动统计当天所有模型的调用次数与花费
-- 生成极具户晨风特色的财报文本（重点突出“不🙅‍♀️可🙅‍♀️能🙅‍♀️不🙅‍♀️交”）
-- 支持音频文件转语音消息发送（用于播放公布收入的小曲）
-- 支持私聊/群聊自动推送
 
-## 财报示例
-你的麦麦会给你发这种东西：
-```
-我是小泪，我在迪士尼乐园的派对现场向各位网友兼股东汇报2025年11月29日我在全网的收入情况。
+- 统计今日模型请求、回复和成本
+- 支持 `/expenses` 和 `/今日财报` 指令立即生成财报
+- 支持作为 Tool 被麦麦主动调用
+- 支持“默认”和“麦晨风”两种财报模式
+- 支持管理员命令在线切换财报模式
+- 支持合并转发消息或普通消息发送
+- 使用 HTML 渲染图片展示累计请求次数、回复成本和各模型回复成本
+- 可选定时发送和 BGM 音频
 
-2025年11月29日收入再次创出历史新高📈✨
-我在2025年11月29日的税前总收入为：0万0元💸。
-除广告收入和带货佣金外，在缴纳了约25%即 0万0元 的个人所得税之后，此为系统自动扣除，***不🙅‍♀️可🙅‍♀️能🙅‍♀️不🙅‍♀️交*** 😡💢（咬牙切齿😣），我的税后总收入为 0万0元🙃。
+## 财报模式
 
-🖕以上为我的收入情况，下面是我的支出情况👇
-2025年11月29日我去了：火星🚀、深海🐙、KFC🍗、自宅卧室😴 回复群员信息📱。
-累计请求API 248 次🔁，回复消息67条✉️。
-我的回复成本累计为：0.3045 元💔💰。
-其中：
-grok-4-1-fast-non-reasoning：0.0905 元
-deepseek-ai/DeepSeek-V3.2-Exp：0.1265 元
-...（详细列出每个模型）
+### 默认模式
 
-所以，2025年11月29日我的净收入为 -0.3045 元 📉😵💫。
+默认模式文案偏正常，适合日常查看成本。默认情况下：
 
-小泪一路走来，是因为屏幕前各位群友的支持🤝💛才有了不一样的人生🌟。
-月落乌啼霜满天，江枫渔火对愁眠。📜✨
-也正是你们的陪伴，给了我笃定前行的勇气💪🕊️。
-再次感谢各位群友的支持🙏尤其要感谢 810、艾斯比 两位的强力支持⚡🔥！
-以及所有群员的陪伴❤️ 再次谢谢大家🙇‍♂️🙇‍♀️！
-```
+1. 第一条消息：今日财报开头语
+2. 第二条消息：图片，包含累计请求、回复消息、回复成本、各模型成本
 
-如果开了语音，她还会附上一段咬牙切齿的音频，效果更佳。
+默认模式第一条文本可通过 `report.default_opening` 修改，支持 `{date}` 占位符。
 
-## 触发方式
+### 麦晨风模式
 
-### Command（指令触发）
-```
-/expenses        # 立即发送今日财报
+让你的麦麦化身“户晨风本风”，每天用咬牙切齿的语气公开处刑自己（并顺带感谢股东）：
+
+1. 第一条消息：麦晨风风格开头语
+2. 第二条消息：图片，包含累计请求、回复消息、回复成本、各模型成本
+3. 第三条消息：感谢文案
+
+## 指令
+
+```text
+/expenses
+/今日财报
 ```
 
-### Action（关键词触发）
-- 需要发送今日财务总结时
-- 有人让你咬牙切齿时
-- 有人让你模仿户晨风不可能不交时
-- 有人让你公开收入时
+管理员可切换模式：
 
-### 自动发送
-在 `config.toml` 中配置后，麦麦会每天定时将财报自动推送到私聊和群聊中。
+```text
+/财报模式 默认
+/财报模式 麦晨风
+/expensesmode default
+/expensesmode maichenfeng
+```
+
+`/财报模式` 和 `/expensesmode` 始终仅管理员可用。管理员通过 `permission.admins` 配置 QQ 号。
+
+## 配置
+
+仓库提供 `config.example.toml`，可作为默认配置参考。主要配置如下：
+
+```toml
+[plugin]
+config_version = "1.0.0"
+
+[report]
+mode = "default"
+title = "今日模型调用财报"
+llm_task = "utils"
+use_forward_message = true
+default_opening = "{date}模型调用财报已生成，以下是今日请求次数、回复量与模型成本汇总。"
+
+[permission]
+query_admin_only = false
+admins = []
+
+[scheduler]
+enabled = false
+time = "23:30"
+group_ids = []
+private_ids = []
+
+[fallback]
+xiao_names = ["小麦"]
+locations = ["KFC", "卧室", "广州塔", "下水道"]
+poems = [
+  "How do you do, you like me and I like you.",
+  "Shut up! I read this inside the book I read before."
+]
+thanks_list = ["810", "艾斯比"]
+
+[audio]
+enabled = false
+file_location = "audio.mp3"
+```
+
+`report.use_forward_message = true` 时使用合并转发消息发送；设为 `false` 时会按普通消息逐条发送文本和图片。
+
+`report.llm_task` 用于配置麦晨风模式生成地点、“我去了……”和诗句时使用的任务名，插件会通过 SDK 公共接口 `ctx.llm.generate(..., model=report.llm_task)` 调用，默认使用 `utils`。小名不会交给 LLM 生成，只会从 `fallback.xiao_names` 中选择。
+
+`permission.query_admin_only = true` 时，`/expenses` 和 `/今日财报` 仅管理员可用；模式切换命令始终仅管理员可用。
+
+## Tool
+
+麦麦在需要“生成今日财报”“公开模型调用成本”“麦晨风式收入汇报”等场景下可以调用 `expenses_summary`。
 
 ## 安装
-把插件扔进 `plugins` 目录，重启 MaiBot 即可。
 
-## TODO
-更好的日志
+将插件目录放入 MaiBot 的插件目录，确认 `_manifest.json` 与 `plugin.py` 位于同一目录后重启 MaiBot。
+
+## 兼容性
+
+- MaiBot 最低版本：`1.0.9`
+- SDK 版本：`2.6`
+
+插件使用 `ctx.statistics.local.*` 获取统计数据，使用 `ctx.render.html2png()` 生成图片。合并转发模式使用 `ctx.send.forward()`，普通消息模式使用 `ctx.send.text()` 和 `ctx.send.image()`。
+
+统计口径：MaiBot 统计 API 的 `days` 参数表示最近 N 天数据；插件会使用小时粒度趋势数据，并按本地日期过滤为当天 0 点至当前时间，避免新的一天继续计入前一日的 24H 数据。
+
+## 更新日志
+
+### 1.0.0
+
+- 移植到 MaiBot 1.0.9+ 与 sdk2.6.0+。
+- 新增默认模式与麦晨风模式。
+- 新增合并转发消息/普通消息发送配置。
+- 新增 `/expenses`、`/今日财报` 查询命令。
+- 新增 `/财报模式`、`/expensesmode` 管理员模式切换命令。
+- 新增管理员列表与查询命令权限配置。
+- 新增 `config.example.toml` 默认配置示例。
+- 使用 `ctx.statistics.local.*` 统计当天模型调用与成本，按本地日期过滤当天 0 点后的小时数据。
+- 使用 `ctx.llm.generate(..., model=report.llm_task)` 生成麦晨风模式短素材。
+- 使用 HTML 转图片展示累计请求、回复消息、回复成本和各模型回复成本。
+
+## 鸣谢
+
+[Kmaj1st/expenses_summary](https://github.com/Kmaj1st/expenses_summary) - 一个 MaiBot 插件，让你的麦麦化身“户晨风本风”，每天用咬牙切齿的语气公开处刑自己（并顺带感谢股东），麦晨风模式取自此插件。
+
+## 许可证
+MIT

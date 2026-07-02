@@ -1,704 +1,1515 @@
 """
-Author: Kmaj
+MaiBot 1.0.0 / sdk2.x expenses summary plugin.
 """
 
+from __future__ import annotations
+
 import asyncio
+import base64
+import html
+import json
 import random
-
-from datetime import datetime, timedelta
+import re
+from dataclasses import dataclass
+from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import List, Optional, Tuple, Type
+from typing import Any, Callable, Iterable, Optional
 
-from src.chat.message_receive.chat_stream import ChatStream
-from src.common.data_models.database_data_model import DatabaseMessages
-from src.common.logger import get_logger
-from src.plugin_system.apis import send_api
-from src.plugin_system.apis.chat_api import ChatManager
-from src.plugin_system.apis.config_api import get_global_config
-from src.plugin_system.apis.llm_api import generate_with_model, \
-    get_available_models
-from src.plugin_system import (
-    BasePlugin,
-    register_plugin,
-    BaseAction,
-    BaseCommand,
-    BaseTool,
-    ComponentInfo,
-    ActionActivationType,
-    ConfigField,
-)
-from src.webui.statistics_routes import DashboardData, StatisticsSummary, \
-    get_dashboard_data
+try:
+    from maibot_sdk import Command, Field, MaiBotPlugin, PluginConfigBase, Tool
+except ImportError:  # Allows local syntax checks without the MaiBot SDK.
+    def Command(*_args: Any, **_kwargs: Any) -> Callable:
+        return lambda func: func
 
-logger = get_logger("expenses_summary")
+    def Tool(*_args: Any, **_kwargs: Any) -> Callable:
+        return lambda func: func
 
+    def Field(default: Any = None, **_kwargs: Any) -> Any:
+        default_factory = _kwargs.get("default_factory")
+        if default_factory:
+            return default_factory()
+        return default
 
-class ExpensesSummaryAction(BaseAction):
-    """生成今日财务总结的动作"""
+    class PluginConfigBase:
+        pass
 
-    action_name = "expenses_summary_action"
-    action_description = "生成今日财务总结动作"
-    activation_type = ActionActivationType.ALWAYS  # 始终激活
-
-    action_parameters = {}
-    action_require = ["需要发送今日财务总结时",
-                      "有人让你咬牙切齿时",
-                      "有人让你模仿户晨风不可能不交时",
-                      "有人让你公开收入时"]
-    associated_types = ["text"]
-
-    def __init__(
-            self,
-            action_data: dict,
-            action_reasoning: str,
-            cycle_timers: dict,
-            thinking_id: str,
-            chat_stream: ChatStream,
-            plugin_config: Optional[dict] = None,
-            action_message: Optional["DatabaseMessages"] = None,
-            **kwargs,
-    ):
-        super().__init__(
-            action_data,
-            action_reasoning,
-            cycle_timers,
-            thinking_id,
-            chat_stream,
-            plugin_config,
-            action_message,
-            **kwargs
-            )
-
-        try:
-            self.audio_enabled, self.url = get_audio_config(self)
-        except Exception as e:
-            logger.error(f"获取音频开启状态或音频路径出错,将不发送音频: {e}")
-            self.audio_enabled = False
-
-    async def execute(self) -> Tuple[bool, str]:
-        """执行问候动作 - 这是核心功能"""
-        # send summary
-        try:
-            gen_conf = await get_generation_config(self)
-            summary_str = await get_summary_str(*gen_conf)
-            if not summary_str:
-                return False, "未能生成财务总结, 总结为空"
-            await self.send_text(summary_str)
-        except Exception as e:
-            logger.error(f"生成财务总结失败: {e}")
-            return False, "生成财务总结时出错"
-
-        stream_id = self.chat_stream.stream_id
-        if self.audio_enabled:
-            try:
-                await send_api.custom_to_stream(
-                    message_type="voiceurl",
-                    content=self.url,
-                    stream_id=stream_id
-                )
-            except Exception as e:
-                logger.error(f"发送BGM音频失败: {e}")
-
-        return True, "发送了财务总结"
+    class MaiBotPlugin:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            self.ctx = kwargs.get("ctx")
+            self.config = kwargs.get("config")
 
 
-class ExpensesSummaryCommand(BaseCommand):
-    """生成财务总结Command - 响应/expenses命令"""
-
-    command_name = "expenses_summary"
-    command_description = "生成今日财务总结"
-
-    command_pattern = r"^/expenses$"
-
-    def __init__(self, message, plugin_config=None):
-        super().__init__(message, plugin_config)
-        self.audio_enabled, self.url = get_audio_config(self)
-
-    async def execute(self) -> Tuple[bool, str, bool]:
-        try:
-            gen_conf = await get_generation_config(self)
-            summary_str = await get_summary_str(*gen_conf)
-            if not summary_str:
-                return False, "未能生成财务总结, 总结为空", True
-            await self.send_text(summary_str)
-        except Exception as e:
-            logger.error(f"生成财务总结失败: {e}")
-            return False, "生成财务总结时出错", True
-
-        stream_id = self.message.chat_stream.stream_id
-        if self.audio_enabled:
-            try:
-                await send_api.custom_to_stream(
-                    message_type="voiceurl",
-                    content=self.url,
-                    stream_id=stream_id
-                )
-            except Exception as e:
-                logger.error(f"发送BGM音频失败: {e}")
-        return True, "通过调用命令成功发送了财务总结", True
+PLUGIN_DIR = Path(__file__).parent
+REPORT_MODE_DEFAULT = "default"
+REPORT_MODE_MAICHENFENG = "maichenfeng"
 
 
-class ExpensesSummaryTool(BaseTool):
-    """生成今日财务总结的工具"""
-
-    name = "expenses_summary"
-    description = "生成今日的财务总结的恶搞版string, 模仿户晨风的风格"
-    available_for_llm = True
-
-    async def execute(self) -> str:
-        gen_conf = await get_generation_config(self)
-        return get_summary_str(*gen_conf)
+@dataclass
+class ModelCost:
+    name: str
+    requests: int = 0
+    replies: int = 0
+    cost: float = 0.0
 
 
-@register_plugin
-class ExpensesSummaryPlugin(BasePlugin):
-    """户晨风格式财务总结插件"""
-
-    # 插件基本信息
-    plugin_name: str = "expenses_summary_plugin"  # 内部标识符
-    enable_plugin: bool = True
-    dependencies: List[str] = []  # 插件依赖列表
-    python_dependencies: List[str] = []  # Python包依赖列表
-    config_file_name: str = "config.toml"  # 配置文件名
-
-    # 配置节描述
-    config_section_descriptions = {"plugin": "插件基础信息",
-                                   "fallback": "运行时出错的fallback配置",
-                                   "audio": "音频发送信息(用于发送BGM)",
-                                   "other": "其他"}
-
-    # 配置Schema定义
-    config_schema: dict = {
-        "plugin": {
-            "config_version": ConfigField(type=str, default="1.0.0",
-                                          description="配置文件版本"),
-            "enabled": ConfigField(type=bool, default=True,
-                                   description="是否启用插件"),
-        },
-        "scheduler": {
-            "enabled": ConfigField(type=bool, default=False,
-                                   description="是否启用定时任务"),
-            "time": ConfigField(type=str, default="23:30",
-                                description="于每日hh:mm自动发送财务总结"),
-            "qq_groups": ConfigField(
-                type=list[str], default=["111", "222"],
-                description="定时发送财务总结的QQ群列表"
-            ),
-            "qq_private": ConfigField(
-                type=list[str], default=["333", "444"],
-                description="定时发送财务总结的QQ私聊列表"
-            )
-        },
-        "fallback": {
-            "xiao_name": ConfigField(
-                type=list[str], default=["小爱"], description="出错时使用的小名列表"
-            ),
-            "location": ConfigField(
-                type=list[str], default=["KFC", "卧室", "广州塔", "下水道"],
-                description="出错时使用的位置列表"
-            ),
-            "poem": ConfigField(
-                type=list[str],
-                default=[
-                    "How do you do, you like me and I like you.",
-                    "Shut up! I read this inside the book I read before."
-                ],
-                description="出错时使用的诗句"
-            )
-        },
-        "audio": {
-            "enabled": ConfigField(type=bool, default=True,
-                                   description="是否启用音频回复功能"),
-            "file_location": ConfigField(
-                type=str,
-                default=(Path(__file__).parent / "audio.mp3").as_posix(),
-                description="音频文件存储位置"
-            ),
-        },
-        "other": {
-            "thanks_list": ConfigField(type=List[str],
-                                       default=["810", "艾斯比"],
-                                       description="感谢名单"),
-        }
-    }
-
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.scheduler = ExpensesScheduler(self)
-        asyncio.create_task(self._start_scheduler_after_delay())
-
-    async def _start_scheduler_after_delay(self):
-        """延迟启动定时任务"""
-        await asyncio.sleep(10)
-        if self.scheduler:
-            await self.scheduler.start()
-        else:
-            logger.error("初始化定时任务失败")
-
-    def get_plugin_components(self) -> List[Tuple[ComponentInfo, Type]]:
-        """
-        获取插件组件
-        """
-        return [
-            (ExpensesSummaryAction.get_action_info(), ExpensesSummaryAction),
-            (ExpensesSummaryTool.get_tool_info(), ExpensesSummaryTool),
-            (ExpensesSummaryCommand.get_command_info(), ExpensesSummaryCommand)
-        ]
+@dataclass
+class ReportData:
+    date_text: str
+    total_requests: int
+    total_replies: int
+    total_cost: float
+    model_costs: list[ModelCost]
 
 
-class ExpensesScheduler:
-    """财务总结定时任务"""
-
-    def __init__(self, plugin: ExpensesSummaryPlugin):
-        self.plugin = plugin    # 插件
-        self.enabled = None     # 是否启用
-        self.trigger_t = None   # 触发时间
-        self.gen_conf = None   # 生成配置
-        self.stream_ids = []    # 聊天流ID
-        self.audio_enabled = None   # 是否启用音频
-        self.audio_file = None  # 音频文件
-        self.logger = get_logger("ExpensesScheduler")
-        self.is_running = False
-        self.task = None
-
-    async def _init(self):
-        """初始化定时任务需要的配置"""
-        try:
-            self.enabled, self.trigger_t, qq_groups, qq_private = \
-                await get_scheduler_config(self.plugin)
-            self.gen_conf = await get_generation_config(self.plugin)
-            self.audio_enabled, self.audio_file = \
-                await get_audio_config(self.plugin)
-        except Exception as e:
-            self.logger.error(f"获取定时任务配置失败: {e}")
-            return
-
-        try:
-            for gid in qq_groups:
-                gs: ChatStream = ChatManager.get_group_stream_by_group_id(gid)
-                if gs:
-                    if gs not in self.stream_ids:
-                        self.stream_ids.append(gs.stream_id)
-            for pid in qq_private:
-                ps: ChatStream = ChatManager.get_private_stream_by_user_id(pid)
-                if ps:
-                    if ps not in self.stream_ids:
-                        self.stream_ids.append(ps.stream_id)
-        except Exception as e:
-            self.logger.error(f"获取聊天流失败: {e}")
-
-    async def start(self):
-        """启动定时任务"""
-        if self.is_running:
-            return
-
-        if self.enabled is None:
-            await self._init()
-
-        if self.enabled:
-            self.is_running = True
-            self.task = asyncio.create_task(self._schedule_loop())
-            self.logger.info(f"设置的触发时间是: {self.trigger_t}")
-        elif self.enabled is False:
-            self.logger.info("定时任务已关闭")
-        else:
-            self.logger.info("定时任务启动失败")
-
-    async def _schedule_loop(self):
-        """定时任务循环"""
-        now = datetime.now()
-        next_t = now.replace(
-            hour=int(self.trigger_t.split(":")[0]),
-            minute=int(self.trigger_t.split(":")[1]),
-            second=0,
-            microsecond=0
-        )
-        if now > next_t:    # 如果设定是在AM, 但现在在PM
-            next_t += timedelta(days=1)
-
-        while True:
-            now = datetime.now()
-            if now <= next_t:
-                try:
-                    seconds = max((next_t - now).total_seconds(), 0)
-                    self.logger.info("将在%s自动发送财务总结" %
-                                     next_t.strftime("%Y-%m-%d %H:%M:%S"))
-                    await asyncio.sleep(seconds)
-                except Exception as e:
-                    self.logger.error(f"谁打扰了我的睡眠: {e}")
-                    return
-            self.logger.info("自动发送财务总结")
-            next_t += timedelta(days=1)
-            text_exceptions = []
-            audio_exceptions = []
-            try:
-                summary_str = await get_summary_str(*self.gen_conf)
-                if not summary_str:
-                    return False, "未能生成财务总结, 总结为空"
-                for s in self.stream_ids:
-                    try:
-                        await send_api.text_to_stream(text=summary_str,
-                                                      stream_id=s)
-                    except Exception as e:
-                        text_exceptions.append([s, e])
-                self.logger.info("发送了财务总结")
-                if self.audio_enabled:
-                    for s in self.stream_ids:
-                        try:
-                            await send_api.custom_to_stream(
-                                message_type="voiceurl",
-                                content=self.audio_file,
-                                stream_id=s
-                            )
-                        except Exception as e:
-                            audio_exceptions.append([s, e])
-                    self.logger.info("发送了BGM音频")
-                else:
-                    self.logger.info("未启用音频")
-            except Exception as e:
-                self.logger.error(f"生成财务总结失败: {e}")
-                if now > next_t:
-                    next_t += timedelta(days=1)
+@dataclass
+class FunElements:
+    xiao_name: str
+    location: str
+    went_to: str
+    poem: str
 
 
-async def get_summary_str(personality: str,
-                          names: List[str],
-                          fb_xnames: List[str],
-                          fb_loc: List[str],
-                          fb_poems: List[str],
-                          thanks_list: List[str]) -> str:
-    """
-    生成今日财务总结
-
-    Args:
-        personality: 人格
-        names: 设定的名字
-        fb_xnames: fallback的名字
-        fb_loc: fallback的地点
-        fb_poems: fallback的诗
-        thanks_list: 感谢名单
-
-    Returns:
-        str: 今日财务总结
-    """
-    dash = await _get_dash_stats_today()
-
-    model_expenses_str = _get_model_expenses_str(dash=dash)
-
-    today = datetime.now().strftime("%Y年%m月%d日")
-
-    xiao_name, location, went_to, poem = await _get_settings(
-        personality=personality,
-        names=names,
-        fb_xnames=fb_xnames,
-        fb_loc=fb_loc,
-        fb_poems=fb_poems
+class ReportConfig(PluginConfigBase):
+    mode: str = Field(
+        default=REPORT_MODE_DEFAULT,
+        title="财报模式",
+        description="可选：default/默认、maichenfeng/麦晨风",
+    )
+    title: str = Field(default="今日模型调用财报", title="默认模式标题")
+    llm_task: str = Field(default="utils", title="财报文案模型任务名")
+    use_forward_message: bool = Field(default=True, title="使用转发消息发送")
+    default_opening: str = Field(
+        default="{date}模型调用财报已生成，以下是今日请求次数、回复量与模型成本汇总。",
+        title="默认模式开头文本",
+        description="可使用 {date} 占位符表示当天日期",
     )
 
-    ss: StatisticsSummary = dash.summary
 
-    thanks_str = "、".join(thanks_list)
-
-    # summary str
-    summary = f"我是{xiao_name}，我在{location}向各位网友兼股东汇报{today}我在全网的收入情况。\n"
-    summary += f"{today}收入再次创出历史新高📈✨\n"
-    summary += f"我在{today}的税前总收入为：0万0元💸。其中：所有收入 0万0元。\n"
-    summary += "除广告收入和带货佣金外，在缴纳了约25%即 0万0元 的个人所得税之后，"
-    summary += "此为系统自动扣除，"
-    summary += "***不🙅‍♀️可🙅‍♀️能🙅‍♀️不🙅‍♀️交*** 😡💢（咬牙切齿😣），"
-    summary += "我的税后总收入为 0万0元🙃。\n\n"
-
-    summary += "🖕以上为我的收入情况，下面是我的支出情况👇\n\n"
-
-    summary += f"{today}{went_to}\n"
-    summary += f"累计请求API {ss.total_requests} 次🔁，"
-    summary += f"回复消息{ss.total_replies}条✉️。\n"
-    summary += f"我的回复成本累计为：{ss.total_cost:.4f} 元💔💰。其中：\n"
-    summary += model_expenses_str
-
-    summary += f"所以，{today}我的净收入为 -{ss.total_cost:.4f} 元 📉😵💫。\n\n"
-
-    summary += f"{xiao_name}一路走来，是因为屏幕前各位群友的支持🤝💛才有了不一样的人生🌟。\n"
-    summary += f"{poem} 📜✨\n"
-    summary += "也正是你们的陪伴，给了我笃定前行的勇气💪🕊️。\n"
-    summary += f"再次感谢各位群友的支持🙏尤其要感谢 {thanks_str} 两位的强力支持⚡🔥！\n"
-    summary += "以及所有群员的陪伴❤️ 再次谢谢大家🙇‍♂️🙇‍♀️！"
-
-    return summary
+class PermissionConfig(PluginConfigBase):
+    query_admin_only: bool = Field(default=False, title="查询命令仅管理员可用")
+    admins: list[str] = Field(default=[], title="管理员 QQ 号列表")
 
 
-def _get_model_expenses_str(dash: DashboardData) -> str:
-    """
-    获取模型费用字符串
-
-    Args:
-        dash: DashboardData
-
-    Returns:
-        str: 模型费用字符串
-    """
-    s = ""
-    for m in dash.model_stats:
-        s += f"{m.model_name}：{m.total_cost:.4f} 元\n"
-    s += "\n"
-    return s
+class SchedulerConfig(PluginConfigBase):
+    enabled: bool = Field(default=False, title="启用定时发送")
+    time: str = Field(default="23:30", title="定时发送时间")
+    group_ids: list[str] = Field(default=[], title="定时发送群号")
+    private_ids: list[str] = Field(default=[], title="定时发送私聊 QQ")
 
 
-async def _get_settings(personality: str,
-                        names: List[str],
-                        fb_xnames: List[str],
-                        fb_loc: List[str],
-                        fb_poems: List[str]) -> Tuple[str, str, str]:
-    """
-    获取财报中的小名，地点和诗句
-
-    Args:
-        personality: 人格
-        names: 设定的名字
-        fb_xnames: fallback的名字
-        fb_loc: fallback的地点
-        fb_poems: fallback的诗
-
-    Returns:
-        Tuple[str, str, str]: 小名，地点和诗句
-    """
-    def _safe_extract(task_result):
-        from re import sub
-        if isinstance(task_result, Exception):
-            return ""
-        success, result, _, _ = task_result
-        return sub(
-            r'["“”\'‘’]', '', (result or "").strip().replace("\n", " ")
-        ) if success else ""
-
-    xiao_name = None
-    location = None
-    went_to = None
-    poem = None
-
-    try:
-        replyer = get_available_models()["replyer"]
-        # generate xiao_name, location and poem concurrently
-        xiao_name_task = generate_with_model(
-            prompt="从以下名字中任选一个构造可爱小名,只返回“小X”形式."
-            f"不要任何解释:{','.join(names)}",
-            model_config=replyer,
-            temperature=1.0,
-            max_tokens=8
-        )
-        location_task = generate_with_model(
-            prompt=f"她{personality},她现在最不可能在什么地方?"
-            "可以是真实城市,自宅卧室,火星,深海,丛林,KFC,任意梦幻或搞笑地点."
-            "尽量搞怪.只返回地点名称,可长可短.",
-            model_config=replyer,
-            temperature=0.8,
-            max_tokens=60
-        )
-        went_to_task = generate_with_model(
-            prompt="她{personality},她现在最不可能在什么地方?"
-            "按照这个模板回复:"
-            "\"我去了：{{地点}}、{{地点}}、{{地点}}、{{地点}} 回复群员信息📱。\""
-            "请把所有的{{地点}}都替换为那些地方."
-            "所有的地点后面要加一个emoji."
-            "可以是真实城市,自宅卧室,火星,深海,丛林,KFC,任意梦幻或搞笑地点."
-            "尽量搞怪.只返回那句套了模板的句子,可长可短.",
-            model_config=replyer,
-            temperature=0.8,
-            max_tokens=120
-        )
-        poem_task = generate_with_model(
-            prompt="给我两句随机的诗句或者歌词甚至是台词引用(任何语言都行)."
-            "例如:\"爸爸的爸爸叫爷爷, 爸爸的妈妈叫奶奶.\""
-            "或者是\"你怎么穿着品如的衣服,还用着她的东西?\""
-            "控制在40字以内.只返回诗句.",
-            model_config=replyer,
-            temperature=0.8,
-            max_tokens=60
-        )
-
-        raw_results = await asyncio.gather(
-            xiao_name_task,
-            location_task,
-            went_to_task,
-            poem_task,
-            return_exceptions=True
-        )
-
-        xiao_name, location, went_to, poem = [
-            _safe_extract(r) for r in raw_results]
-    except Exception as e:
-        logger.error(f"生成随机要素失败, 将使用fallback: {e}")
-    try:
-        if not xiao_name:
-            xiao_name = random.choice(fb_xnames)
-        if not location:
-            location = random.choice(fb_loc)
-        if not went_to:
-            went_to = random.choice(fb_loc)
-        if not poem:
-            poem = random.choice(fb_poems)
-    except Exception as e:
-        raise Exception(f"获取fallback随机要素失败: {e}")
-
-    return xiao_name, location, went_to, poem
-
-
-async def get_audio_config(
-        caller: ExpensesSummaryAction
-        | ExpensesSummaryCommand
-        | ExpensesSummaryTool
-        | ExpensesSummaryPlugin) -> tuple[bool, str]:
-    """
-    获取插件配置, 返回所有与生成音频有关的配置
-
-    Args:
-        caller: ExpensesSummaryAction
-            | ExpensesSummaryCommand
-            | ExpensesSummaryTool
-
-    Returns:
-        bool: 是否启用音频
-        str: 音频文件目录
-    """
-    try:
-        return caller.get_config(
-            key="audio.enabled",
-            default=True
-        ), caller.get_config(
-            key="audio.file_location",
-            default=""
-        )
-    except Exception as e:
-        logger.error(f"获取音频开启状态或音频路径出错,将不发送音频: {e}")
-        return False, ""
-
-
-async def get_scheduler_config(
-        caller: ExpensesSummaryAction
-        | ExpensesSummaryCommand
-        | ExpensesSummaryTool
-        | ExpensesSummaryPlugin) -> tuple[bool, str, List[int], List[int]]:
-    """
-    获取插件配置, 返回所有与定时任务有关的配置
-
-    Args:
-        caller: ExpensesSummaryAction
-            | ExpensesSummaryCommand
-            | ExpensesSummaryTool
-
-    Returns:
-        bool: 是否启用定时任务
-        str: 定时任务时间
-        List[int]: qq群列表
-        List[int]: 私聊列表
-    """
-    try:
-        return caller.get_config(
-            key="scheduler.enabled",
-            default=False
-        ), caller.get_config(
-            key="scheduler.time",
-            default="23:30"
-        ), caller.get_config(
-            key="scheduler.qq_groups",
-            default=[]
-        ), caller.get_config(
-            key="scheduler.qq_private",
-            default=[]
-        )
-    except Exception as e:
-        logger.error(f"获取定时任务开启状态或时间出错,将不启用定时任务: {e}")
-        return False, ""
-
-
-async def get_generation_config(
-        caller: ExpensesSummaryAction
-        | ExpensesSummaryCommand
-        | ExpensesSummaryTool
-        | ExpensesSummaryPlugin) -> tuple[
-            str, List[str], List[str], List[str], List[str], List[str]
-        ]:
-    """
-    获取插件配置, 返回所有与生成内容有关的配置
-
-    Args:
-        caller: ExpensesSummaryAction
-            | ExpensesSummaryCommand
-            | ExpensesSummaryTool
-
-    Returns:
-        str: 人格
-        List[str]: 设定的名字
-        List[str]: fallback的名字
-        List[str]: fallback的地点
-        List[str]: fallback的诗
-        List[str]: 感谢名单
-    """
-    # read config
-    try:
-        nickname = get_global_config("bot.nickname", "我")
-        alias_names = get_global_config("bot.alias_names", [])
-        personality = get_global_config("personality.personality", "")
-
-        names = [nickname] + alias_names
-
-        # fallback values
-        fb_xnames = caller.get_config(
-            key="fallback.xiao_name",
-            default=["小爱"]
-        )
-        fb_loc = caller.get_config(
-            key="fallback.location",
-            default=["KFC", "卧室", "广州塔", "下水道"]
-        )
-        fb_poems = caller.get_config(
-            key="fallback.poem",
-            default=[
-                "How do you do, you like me and I like you.",
-                "Shut up! I read this inside the book I read before."
-            ]
-        )
-        thanks_list = caller.get_config(
-            key="fallback.thanks_list",
-            default=["810", "艾斯比"]
-        )
-    except Exception as e:
-        logger.error(f"读取配置失败,使用默认值: {e}")
-        names = ["小爱"]
-        fb_loc = ["KFC", "卧室", "广州塔", "下水道"]
-        fb_poems = [
+class FallbackConfig(PluginConfigBase):
+    xiao_names: list[str] = Field(default=["小麦"], title="麦晨风模式小名")
+    locations: list[str] = Field(
+        default=["KFC", "卧室", "广州塔", "下水道"],
+        title="麦晨风模式地点",
+    )
+    poems: list[str] = Field(
+        default=[
             "How do you do, you like me and I like you.",
-            "Shut up! I read this inside the book I read before."
-        ]
+            "Shut up! I read this inside the book I read before.",
+        ],
+        title="麦晨风模式随机诗句",
+    )
+    thanks_list: list[str] = Field(default=["810", "艾斯比"], title="感谢名单")
 
-    return personality, names, fb_xnames, fb_loc, fb_poems, thanks_list
+
+class AudioConfig(PluginConfigBase):
+    enabled: bool = Field(default=False, title="启用 BGM 音频")
+    file_location: str = Field(
+        default=(PLUGIN_DIR / "audio.mp3").as_posix(),
+        title="音频文件路径",
+    )
 
 
-async def _get_dash_stats_today() -> DashboardData:
-    """
-    获取今日(从0点到现在的)仪表盘数据
+class PluginMetaConfig(PluginConfigBase):
+    config_version: str = Field(default="1.0.0", title="配置文件版本")
 
-    Returns:
-        DashboardData: 今日仪表盘数据
-    """
+
+class ExpensesSummaryConfig(PluginConfigBase):
+    plugin: PluginMetaConfig = Field(default_factory=PluginMetaConfig, title="插件")
+    report: ReportConfig = Field(default_factory=ReportConfig, title="财报")
+    permission: PermissionConfig = Field(default_factory=PermissionConfig, title="权限")
+    scheduler: SchedulerConfig = Field(default_factory=SchedulerConfig, title="定时发送")
+    fallback: FallbackConfig = Field(default_factory=FallbackConfig, title="麦晨风素材")
+    audio: AudioConfig = Field(default_factory=AudioConfig, title="音频")
+
+
+class ExpensesSummaryPlugin(MaiBotPlugin):
+    """Generate daily model usage and cost reports."""
+
+    config_model = ExpensesSummaryConfig
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._scheduler_task: Optional[asyncio.Task] = None
+        self._fallback_config = ExpensesSummaryConfig()
+
+    async def on_load(self) -> None:
+        config = self._get_config()
+        if config.scheduler.enabled:
+            self._scheduler_task = asyncio.create_task(self._scheduler_loop())
+
+    async def on_unload(self) -> None:
+        if self._scheduler_task:
+            self._scheduler_task.cancel()
+            try:
+                await self._scheduler_task
+            except asyncio.CancelledError:
+                pass
+            self._scheduler_task = None
+
+    async def on_config_update(self, *args: Any, **kwargs: Any) -> None:
+        new_config = _extract_updated_config(args, kwargs)
+        if new_config is not None:
+            self._fallback_config = new_config
+        await self.on_unload()
+        await self.on_load()
+
+    @Command(
+        name="expenses",
+        description="生成今日模型调用财报",
+        pattern=r"^/(?:expenses|今日财报)$",
+    )
+    async def expenses_command(
+        self,
+        ctx: Any = None,
+        message: Any = None,
+        stream_id: Optional[str] = None,
+        chat_stream: Any = None,
+        *_args: Any,
+        **kwargs: Any,
+    ) -> tuple[bool, str, bool]:
+        target_stream_id = _first_present(
+            stream_id,
+            _get_stream_id(ctx),
+            _get_stream_id(message),
+            _get_stream_id(chat_stream),
+            _get_stream_id(kwargs),
+        )
+        if not _can_query(self._get_config(), ctx, message, kwargs):
+            return True, "你没有权限使用财报查询命令", True
+        sent = await self._send_report(self.ctx, target_stream_id)
+        return sent, "已发送今日模型调用财报" if sent else "财报发送失败", True
+
+    @Command(
+        name="expenses_mode",
+        description="切换财报模式",
+        pattern=r"^/(?:财报模式|expensesmode)(?:\s+(?P<mode>\S+))?$",
+    )
+    async def expenses_mode_command(
+        self,
+        ctx: Any = None,
+        message: Any = None,
+        stream_id: Optional[str] = None,
+        chat_stream: Any = None,
+        *_args: Any,
+        **kwargs: Any,
+    ) -> tuple[bool, str, bool]:
+        target_stream_id = _first_present(
+            stream_id,
+            _get_stream_id(ctx),
+            _get_stream_id(message),
+            _get_stream_id(chat_stream),
+            _get_stream_id(kwargs),
+        )
+        config = self._get_config()
+        if not _is_admin(config, ctx, message, kwargs):
+            response = "你没有权限切换财报模式"
+            await _send_command_response(self.ctx, response, target_stream_id)
+            return True, response, True
+
+        mode_text = _extract_mode_argument(message, kwargs)
+        if not mode_text:
+            current_mode = "麦晨风" if _normalize_mode(config.report.mode) == REPORT_MODE_MAICHENFENG else "默认"
+            response = f"当前财报模式：{current_mode}。用法：/财报模式 默认 或 /财报模式 麦晨风"
+            await _send_command_response(self.ctx, response, target_stream_id)
+            return True, response, True
+
+        mode = _normalize_mode(mode_text)
+        if not _is_valid_mode_text(mode_text):
+            response = "未知财报模式，可用：默认、麦晨风、default、maichenfeng"
+            await _send_command_response(self.ctx, response, target_stream_id)
+            return True, response, True
+
+        config.report.mode = mode
+        label = "麦晨风" if mode == REPORT_MODE_MAICHENFENG else "默认"
+        response = f"财报模式已切换为：{label}"
+        await _send_command_response(self.ctx, response, target_stream_id)
+        return True, response, True
+
+    @Tool(
+        name="expenses_summary",
+        description="生成并发送今日模型调用次数与成本财报，可用于公开收入、财务总结、麦晨风风格汇报等场景。",
+    )
+    async def expenses_tool(
+        self,
+        ctx: Any = None,
+        stream_id: Optional[str] = None,
+        *_args: Any,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        target_stream_id = _first_present(
+            stream_id,
+            _get_stream_id(ctx),
+            _get_stream_id(kwargs),
+        )
+        sent = await self._send_report(self.ctx, target_stream_id)
+        return {
+            "success": sent,
+            "content": (
+                "今日模型调用财报已生成并发送。不要再额外复述财报内容，下一步等待用户新消息。"
+                if sent
+                else "今日模型调用财报生成完成但发送失败。"
+            ),
+            "metadata": {"pause_execution": sent},
+        }
+
+    async def _send_report(self, ctx: Any, stream_id: Optional[str] = None) -> bool:
+        config = self._get_config()
+        mode = _normalize_mode(config.report.mode)
+        data = await _collect_report_data(ctx)
+        image = await _render_report_image(ctx, data, mode, config.report.title)
+        fun = await _generate_fun_elements(ctx, config) if mode == REPORT_MODE_MAICHENFENG else None
+        nodes = _build_forward_nodes(data, image, mode, config, fun)
+        if config.report.use_forward_message:
+            sent = await _send_forward(ctx, nodes, stream_id)
+        else:
+            sent = await _send_plain_messages(ctx, nodes, stream_id)
+        if config.audio.enabled:
+            await _try_send_audio(ctx, config.audio.file_location, stream_id)
+        return sent
+
+    async def _scheduler_loop(self) -> None:
+        while True:
+            config = self._get_config()
+            await asyncio.sleep(_seconds_until(config.scheduler.time))
+            try:
+                await self._send_scheduled_reports()
+            except Exception as exc:
+                _log(self.ctx, "error", f"定时发送财报失败: {exc}")
+
+    async def _send_scheduled_reports(self) -> None:
+        config = self._get_config()
+        targets = list(config.scheduler.group_ids) + list(config.scheduler.private_ids)
+        if not targets:
+            _log(self.ctx, "warning", "定时财报已启用，但没有配置目标群聊或私聊")
+            return
+        for target in targets:
+            target_ctx = await _resolve_target_context(self.ctx, target)
+            if target_ctx:
+                await self._send_report(target_ctx, _get_stream_id(target_ctx))
+
+    def _get_config(self) -> ExpensesSummaryConfig:
+        try:
+            config = self.config
+        except RuntimeError:
+            return self._fallback_config
+        return config or self._fallback_config
+
+
+async def _collect_report_data(ctx: Any) -> ReportData:
+    local = _resolve_statistics_api(ctx)
+    if local is None:
+        _log(ctx, "warning", "财报统计失败: statistics API 不可用")
+    costs_raw = await _maybe_await(
+        _call_first(local, ["model_trend"], days=1, bucket="hour", top_models=50, metric="cost")
+    )
+    requests_raw = await _maybe_await(
+        _call_first(local, ["model_trend"], days=1, bucket="hour", top_models=50, metric="request")
+    )
+    messages_raw = await _maybe_await(
+        _call_first(local, ["message_trend"], days=1, bucket="hour", top_chats=50)
+    )
+
+    model_costs = _merge_model_stats(None, costs_raw, requests_raw, today_only=True)
+    total_requests = sum(item.requests for item in model_costs)
+    total_cost = sum(item.cost for item in model_costs)
+    total_replies = _series_total(messages_raw, today_only=True)
+
+    if total_requests <= 0:
+        total_requests = _series_total(requests_raw, today_only=True)
+    if total_cost <= 0:
+        total_cost = _series_total(costs_raw, today_only=True)
+
+    return ReportData(
+        date_text=datetime.now().strftime("%Y年%m月%d日"),
+        total_requests=total_requests,
+        total_replies=total_replies,
+        total_cost=total_cost,
+        model_costs=sorted(model_costs, key=lambda item: item.cost, reverse=True),
+    )
+
+
+def _resolve_statistics_api(ctx: Any) -> Any:
+    for path in ("statistics.local", "statistics", "stats.local", "stats"):
+        candidate = _get_path(ctx, path)
+        if candidate is None:
+            continue
+        if all(callable(getattr(candidate, name, None)) for name in ("models", "model_trend", "message_trend")):
+            return candidate
+    return None
+
+
+async def _generate_fun_elements(ctx: Any, config: ExpensesSummaryConfig) -> FunElements:
+    configured_xiao_name = _pick_configured_text(config.fallback.xiao_names, "小麦")
+    fallback = FunElements(
+        xiao_name=configured_xiao_name,
+        location=random.choice(config.fallback.locations or ["KFC"]),
+        went_to=_fallback_went_to(config.fallback.locations),
+        poem=random.choice(config.fallback.poems or ["谢谢大家。"]),
+    )
+    llm = _get_path(ctx, "llm")
+    generate = getattr(llm, "generate", None)
+    if not callable(generate):
+        _log(ctx, "warning", "财报文案模型调用失败: ctx.llm.generate 不可用，使用 fallback 素材")
+        return fallback
+
+    prompt = (
+        "为麦晨风风格的模型调用财报生成三个短素材，只输出 JSON，不要解释。\n"
+        "字段必须是：location、went_to、poem。\n"
+        "location: 一个荒诞但不冒犯的汇报地点。\n"
+        "went_to: 按“我去了：地点、地点、地点、地点 回复群员信息📱。”格式输出，地点尽量不重复，可以带 emoji。\n"
+        "poem: 一句40字以内的诗句、歌词、台词或短句。\n"
+        "示例：{\"location\":\"KFC\",\"went_to\":\"我去了：火星🚀、深海🐙、KFC🍗、自宅卧室😴 回复群员信息📱。\",\"poem\":\"月落乌啼霜满天，江枫渔火对愁眠。\"}"
+    )
     try:
-        return await get_dashboard_data(hours=_hours_from_now())
-    except Exception as e:
-        logger.error(f"获取仪表盘数据失败: {e}")
-        return DashboardData()
+        llm_task = _get_llm_task(config)
+        result = await _call_llm_generate(generate, prompt, llm_task)
+    except Exception as exc:
+        _log(ctx, "warning", f"财报文案模型调用失败，使用 fallback 素材: {exc}")
+        return fallback
+
+    text = _normalize_llm_text(result)
+    if not text:
+        _log(ctx, "warning", f"财报文案模型返回为空，使用 fallback 素材: {_summarize_value(result)}")
+        return fallback
+    values = _parse_fun_elements_text(text)
+    if not values:
+        _log(ctx, "warning", f"财报文案模型返回无法解析，使用 fallback 素材: {text[:120]}")
+        return fallback
+    _log(ctx, "info", f"财报文案模型调用成功，使用任务: {_get_llm_task(config)}")
+    return FunElements(
+        xiao_name=configured_xiao_name,
+        location=values.get("location") or fallback.location,
+        went_to=_normalize_went_to(values.get("went_to")) or fallback.went_to,
+        poem=values.get("poem") or fallback.poem,
+    )
 
 
-def _hours_from_now() -> datetime:
-    """
-    获取从0点到现在的小时数
+async def _call_llm_generate(generate: Callable, prompt: str, llm_task: str) -> Any:
+    call_specs = (
+        ((), {"prompt": prompt, "model": llm_task, "temperature": 0.8, "max_tokens": 180}),
+        ((), {"prompt": prompt, "model": llm_task, "temperature": 0.8}),
+        ((prompt,), {"model": llm_task, "temperature": 0.8, "max_tokens": 180}),
+        ((prompt,), {"model": llm_task, "temperature": 0.8}),
+        ((prompt,), {"model": llm_task}),
+    )
+    last_type_error: Optional[TypeError] = None
+    for args, kwargs in call_specs:
+        try:
+            return await _maybe_await(generate(*args, **kwargs))
+        except TypeError as exc:
+            last_type_error = exc
+            continue
+    if last_type_error:
+        raise last_type_error
+    return None
 
-    Returns:
-        int: 从0点到现在的小时数
-    """
+
+def _get_llm_task(config: ExpensesSummaryConfig) -> str:
+    task = getattr(config.report, "llm_task", None)
+    if not task:
+        task = getattr(config.report, "llm_model", None)
+    return str(task or "utils")
+
+
+def _normalize_llm_text(result: Any) -> str:
+    if isinstance(result, str):
+        return result.strip()
+    for key in ("response", "text", "content", "reply", "message", "result", "output"):
+        value = _pick(result, key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+        if isinstance(value, dict):
+            nested = _normalize_llm_text(value)
+            if nested:
+                return nested
+    return str(result or "").strip()
+
+
+def _parse_fun_elements_text(text: str) -> dict[str, str]:
+    json_values = _parse_fun_elements_json(text)
+    if json_values:
+        return json_values
+    if _looks_like_json_text(text):
+        return {}
+
+    values: dict[str, str] = {}
+    for line in str(text or "").splitlines():
+        if ":" in line:
+            key, value = line.split(":", 1)
+        elif "：" in line:
+            key, value = line.split("：", 1)
+        else:
+            continue
+        normalized_key = key.strip().lower()
+        clean_value = _clean_fun_value(value)
+        if not clean_value:
+            continue
+        if "去了" in normalized_key or "went" in normalized_key:
+            values["went_to"] = clean_value[:120]
+        elif "地点" in normalized_key or "location" in normalized_key:
+            values["location"] = clean_value[:40]
+        elif "诗" in normalized_key or "句" in normalized_key or "poem" in normalized_key:
+            values["poem"] = clean_value[:80]
+    return values
+
+
+def _parse_fun_elements_json(text: str) -> dict[str, str]:
+    raw = str(text or "").strip()
+    if not raw:
+        return {}
+    if raw.startswith("```"):
+        raw = raw.strip("`").strip()
+        if raw.lower().startswith("json"):
+            raw = raw[4:].strip()
+    start = raw.find("{")
+    end = raw.rfind("}")
+    if start >= 0 and end > start:
+        raw = raw[start:end + 1]
+    try:
+        data = json.loads(raw)
+    except (TypeError, ValueError):
+        return _parse_fun_elements_jsonish(raw)
+    if not isinstance(data, dict):
+        return {}
+    mappings = {
+        "location": ("location", "地点"),
+        "went_to": ("went_to", "去了", "went"),
+        "poem": ("poem", "诗句", "短句"),
+    }
+    values: dict[str, str] = {}
+    for target, keys in mappings.items():
+        for key in keys:
+            value = data.get(key)
+            if isinstance(value, str) and value.strip():
+                values[target] = _clean_fun_value(value)
+                break
+    return values
+
+
+def _parse_fun_elements_jsonish(text: str) -> dict[str, str]:
+    raw = str(text or "")
+    mappings = {
+        "location": ("location", "地点"),
+        "went_to": ("went_to", "去了", "went"),
+        "poem": ("poem", "诗句", "短句"),
+    }
+    values: dict[str, str] = {}
+    for target, keys in mappings.items():
+        for key in keys:
+            match = re.search(
+                rf'["“]?{re.escape(key)}["”]?\s*[:：]\s*["“](.*?)(?=["”]\s*[,，}}]|$)',
+                raw,
+                flags=re.DOTALL,
+            )
+            if match:
+                value = _clean_fun_value(match.group(1))
+                if value:
+                    values[target] = value
+                    break
+    return values
+
+
+def _looks_like_json_text(text: str) -> bool:
+    raw = str(text or "").strip()
+    return raw.startswith("{") or raw.startswith("```") or '"location"' in raw or "'location'" in raw
+
+
+def _clean_fun_value(value: Any) -> str:
+    text = str(value or "").strip()
+    text = text.replace("\\n", " ").strip()
+    text = text.strip(" \t\r\n`")
+    text = text.strip('"“”\'‘’')
+    text = text.strip(" \t\r\n,，:：")
+    text = text.strip('"“”\'‘’')
+    while text.endswith((",", "，", '"', "'", "”", "’")):
+        text = text[:-1].strip()
+    return text
+
+
+def _pick_configured_text(values: list[str], fallback: str) -> str:
+    choices = [str(item).strip() for item in (values or []) if str(item).strip()]
+    return random.choice(choices) if choices else fallback
+
+
+def _fallback_went_to(locations: list[str]) -> str:
+    choices = list(dict.fromkeys(str(item).strip() for item in (locations or []) if str(item).strip()))
+    if not choices:
+        choices = ["KFC", "卧室", "广州塔", "下水道"]
+    picked = random.sample(choices, k=min(4, len(choices)))
+    return f"我去了：{'、'.join(picked)} 回复群员信息📱。"
+
+
+def _normalize_went_to(text: Optional[str]) -> str:
+    raw = _clean_fun_value(text)
+    if not raw:
+        return ""
+    if "我去了：" not in raw:
+        return raw[:120]
+
+    prefix, rest = raw.split("我去了：", 1)
+    suffix = ""
+    for marker in (" 回复群员信息", "回复群员信息"):
+        if marker in rest:
+            rest, tail = rest.split(marker, 1)
+            suffix_tail = _clean_fun_value(tail)
+            suffix = f" 回复群员信息{suffix_tail}"
+            break
+
+    places = [_clean_fun_value(item) for item in rest.replace("，", "、").split("、")]
+    places = [item for item in places if item]
+    unique_places = list(dict.fromkeys(places))
+    if not unique_places:
+        return raw[:120]
+    if not suffix:
+        suffix = " 回复群员信息📱。"
+    return f"{prefix}我去了：{'、'.join(unique_places[:4])}{suffix}"[:120]
+
+
+def _summarize_value(value: Any) -> str:
+    text = repr(value)
+    return text[:240]
+
+
+def _extract_updated_config(
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+) -> Optional[ExpensesSummaryConfig]:
+    for key in ("new_config", "config", "updated_config"):
+        candidate = kwargs.get(key)
+        if _looks_like_plugin_config(candidate):
+            return candidate
+
+    for candidate in reversed(args):
+        if _looks_like_plugin_config(candidate):
+            return candidate
+    return None
+
+
+def _looks_like_plugin_config(candidate: Any) -> bool:
+    if candidate is None:
+        return False
+    if isinstance(candidate, ExpensesSummaryConfig):
+        return True
+    return all(hasattr(candidate, attr) for attr in ("report", "scheduler"))
+
+
+def _merge_model_stats(
+    models_raw: Any,
+    costs_raw: Any,
+    requests_raw: Any,
+    today_only: bool = False,
+) -> list[ModelCost]:
+    merged: dict[str, ModelCost] = {}
+
+    for item in _iter_items(models_raw):
+        name = str(_pick(item, "model_name", "model", "name", default="未知模型"))
+        stat = merged.setdefault(name, ModelCost(name=name))
+        stat.requests += int(_pick_number(
+            item,
+            "requests",
+            "request_count",
+            "total_requests",
+            "call_count",
+            "calls",
+            "count",
+            "total",
+        ))
+        stat.replies += int(_pick_number(
+            item,
+            "replies",
+            "reply",
+            "reply_count",
+            "total_replies",
+            "response_count",
+            "responses",
+            "message_count",
+            "messages",
+        ))
+        stat.cost += _pick_number(
+            item,
+            "cost",
+            "total_cost",
+            "amount",
+            "total_amount",
+            "price",
+            "total_price",
+        )
+
+    for name, value in _series_values_by_label(costs_raw, today_only=today_only).items():
+        stat = merged.setdefault(name, ModelCost(name=name))
+        if stat.cost <= 0:
+            stat.cost = value
+
+    for name, value in _series_values_by_label(requests_raw, today_only=today_only).items():
+        stat = merged.setdefault(name, ModelCost(name=name))
+        if stat.requests <= 0:
+            stat.requests = int(value)
+
+    return [item for item in merged.values() if item.requests or item.replies or item.cost]
+
+
+async def _render_report_image(ctx: Any, data: ReportData, mode: str, title: str) -> Any:
+    html_doc = _build_report_html(data, mode, title)
+    renderer = _get_path(ctx, "render")
+    html2png = getattr(renderer, "html2png", None)
+    if callable(html2png):
+        try:
+            return await _maybe_await(
+                html2png(
+                    html_doc,
+                    selector=".sheet",
+                    viewport={"width": 900, "height": 1200},
+                    device_scale_factor=1.0,
+                    full_page=True,
+                )
+            )
+        except TypeError:
+            return await _maybe_await(html2png(html_doc))
+    return html_doc
+
+
+def _build_report_html(data: ReportData, mode: str, title: str) -> str:
+    is_fun = mode == REPORT_MODE_MAICHENFENG
+    page_title = "麦晨风公开收入财报" if is_fun else title
+    subtitle = "不可以不交，但成本可以公开" if is_fun else "今日 0 点至当前的模型调用概览"
+    rows = data.model_costs or [ModelCost(name="暂无模型记录")]
+    max_cost = max([item.cost for item in rows] + [0.01])
+    body_rows = "\n".join(
+        _model_row_html(item, max_cost) for item in rows[:12]
+    )
+
+    return f"""<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<style>
+* {{ box-sizing: border-box; }}
+body {{
+  margin: 0;
+  width: 900px;
+  min-height: 1200px;
+  font-family: "Microsoft YaHei", "PingFang SC", Arial, sans-serif;
+  color: #202124;
+  background: #f4f7f8;
+}}
+.sheet {{
+  min-height: 1200px;
+  padding: 54px;
+  background: linear-gradient(180deg, #ffffff 0%, #eef4f5 100%);
+}}
+.head {{
+  border-left: 10px solid #0f766e;
+  padding-left: 24px;
+  margin-bottom: 34px;
+}}
+.kicker {{
+  font-size: 28px;
+  color: #52605f;
+  margin-bottom: 8px;
+}}
+h1 {{
+  margin: 0;
+  font-size: 54px;
+  line-height: 1.14;
+  letter-spacing: 0;
+}}
+.subtitle {{
+  margin-top: 12px;
+  font-size: 26px;
+  color: #56616a;
+}}
+.metrics {{
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 18px;
+  margin: 34px 0;
+}}
+.metric {{
+  background: #ffffff;
+  border: 1px solid #d9e3e4;
+  border-radius: 8px;
+  padding: 22px;
+}}
+.label {{
+  font-size: 22px;
+  color: #667478;
+}}
+.value {{
+  margin-top: 10px;
+  font-size: 38px;
+  font-weight: 700;
+  color: #0b3b3f;
+}}
+.section-title {{
+  font-size: 30px;
+  font-weight: 700;
+  margin: 40px 0 18px;
+}}
+.row {{
+  background: #ffffff;
+  border: 1px solid #dce5e6;
+  border-radius: 8px;
+  padding: 18px 20px;
+  margin-bottom: 12px;
+}}
+.row-top {{
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 18px;
+}}
+.model {{
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-size: 24px;
+  font-weight: 700;
+}}
+.cost {{
+  flex: 0 0 auto;
+  font-size: 24px;
+  color: #0f766e;
+  font-weight: 700;
+}}
+.bar {{
+  height: 12px;
+  margin: 14px 0 8px;
+  border-radius: 99px;
+  background: #dde7e8;
+  overflow: hidden;
+}}
+.bar span {{
+  display: block;
+  height: 100%;
+  background: #0f766e;
+}}
+.minor {{
+  font-size: 20px;
+  color: #657276;
+}}
+.footer {{
+  margin-top: 36px;
+  padding-top: 20px;
+  border-top: 1px solid #cad7d8;
+  font-size: 22px;
+  color: #52605f;
+}}
+</style>
+</head>
+<body>
+<main class="sheet">
+  <section class="head">
+    <div class="kicker">{html.escape(data.date_text)}</div>
+    <h1>{html.escape(page_title)}</h1>
+    <div class="subtitle">{html.escape(subtitle)}</div>
+  </section>
+  <section class="metrics">
+    <div class="metric"><div class="label">累计请求</div><div class="value">{data.total_requests}</div></div>
+    <div class="metric"><div class="label">回复消息</div><div class="value">{data.total_replies}</div></div>
+    <div class="metric"><div class="label">回复成本</div><div class="value">{data.total_cost:.4f} 元</div></div>
+  </section>
+  <div class="section-title">各模型回复成本</div>
+  {body_rows}
+  <div class="footer">净收入：-{data.total_cost:.4f} 元。{"数据已经公开，股东请审阅。" if is_fun else "数据来自 MaiBot 本地统计接口。"}</div>
+</main>
+</body>
+</html>"""
+
+
+def _model_row_html(item: ModelCost, max_cost: float) -> str:
+    width = max(4, min(100, int(item.cost / max_cost * 100)))
+    detail = f"请求 {item.requests} 次"
+    if item.replies > 0:
+        detail += f" / 回复 {item.replies} 条"
+    return f"""<div class="row">
+  <div class="row-top">
+    <div class="model">{html.escape(item.name)}</div>
+    <div class="cost">{item.cost:.4f} 元</div>
+  </div>
+  <div class="bar"><span style="width:{width}%"></span></div>
+  <div class="minor">{detail}</div>
+</div>"""
+
+
+def _build_forward_nodes(
+    data: ReportData,
+    image: Any,
+    mode: str,
+    config: ExpensesSummaryConfig,
+    fun: Optional[FunElements] = None,
+) -> list[dict[str, Any]]:
+    opening = _build_opening(data, mode, config, fun)
+    nodes = [
+        _make_forward_node("text", opening),
+        _image_node(image),
+    ]
+    if mode == REPORT_MODE_MAICHENFENG:
+        nodes.append(_make_forward_node("text", _build_thanks(data, config, fun)))
+    return nodes
+
+
+def _build_opening(
+    data: ReportData,
+    mode: str,
+    config: ExpensesSummaryConfig,
+    fun: Optional[FunElements] = None,
+) -> str:
+    if mode == REPORT_MODE_MAICHENFENG:
+        xiao_name = fun.xiao_name if fun else random.choice(config.fallback.xiao_names or ["小麦"])
+        location = fun.location if fun else random.choice(config.fallback.locations or ["KFC"])
+        went_to = fun.went_to if fun else _fallback_went_to(config.fallback.locations)
+        return (
+            f"我是{xiao_name}，我在{location}向各位网友兼股东汇报"
+            f"{data.date_text}我在全网的收入情况。\n"
+            f"{data.date_text}收入再次创出历史新高📈✨\n"
+            f"我在{data.date_text}的税前总收入为：0万0元💸。其中：所有收入 0万0元。\n"
+            "除广告收入和带货佣金外，在缴纳了约25%即 0万0元 的个人所得税之后，"
+            "此为系统自动扣除，"
+            "***不🙅‍♀️可🙅‍♀️能🙅‍♀️不🙅‍♀️交*** 😡💢（咬牙切齿😣），"
+            "我的税后总收入为 0万0元🙃。\n\n"
+            "🖕以上为我的收入情况，下面是我的支出情况👇\n\n"
+            f"{data.date_text}{went_to}"
+        )
+    template = config.report.default_opening or ReportConfig().default_opening
+    return template.replace("{date}", data.date_text)
+
+
+def _build_thanks(
+    data: ReportData,
+    config: ExpensesSummaryConfig,
+    fun: Optional[FunElements] = None,
+) -> str:
+    xiao_name = fun.xiao_name if fun else random.choice(config.fallback.xiao_names or ["小麦"])
+    poem = fun.poem if fun else random.choice(config.fallback.poems or ["谢谢大家。"])
+    thanks = "、".join(config.fallback.thanks_list or [])
+    special = f"再次感谢各位群友的支持🙏尤其要感谢 {thanks} 两位的强力支持⚡🔥！\n" if thanks else "再次感谢各位群友的支持🙏\n"
+    return (
+        f"所以，{data.date_text}我的净收入为 -{data.total_cost:.4f} 元 📉😵💫。\n\n"
+        f"{xiao_name}一路走来，是因为屏幕前各位群友的支持🤝💛才有了不一样的人生🌟。\n"
+        f"{poem} 📜✨\n"
+        "也正是你们的陪伴，给了我笃定前行的勇气💪🕊️。\n"
+        f"{special}"
+        "以及所有群员的陪伴❤️ 再次谢谢大家🙇‍♂️🙇‍♀️！"
+    )
+
+
+def _make_forward_node(segment_type: str, content: str) -> dict[str, Any]:
+    return {
+        "user_id": "0",
+        "nickname": "麦麦",
+        "segments": [{"type": segment_type, "content": content}],
+    }
+
+
+def _image_node(image: Any) -> dict[str, Any]:
+    image_base64 = _extract_image_base64(image)
+    if image_base64:
+        return _make_forward_node("image", image_base64)
+    if isinstance(image, str) and image.lstrip().startswith("<!doctype"):
+        return _make_forward_node("text", image)
+    return _make_forward_node("text", "图片生成失败，无法展示财报图。")
+
+
+def _extract_image_base64(image: Any) -> str:
+    if isinstance(image, bytes):
+        return base64.b64encode(image).decode("utf-8")
+
+    if isinstance(image, dict):
+        for key in ("image_base64", "base64", "data", "content"):
+            value = image.get(key)
+            if isinstance(value, str) and value.strip():
+                return _strip_data_url(value)
+            if isinstance(value, bytes):
+                return base64.b64encode(value).decode("utf-8")
+        for key in ("path", "file_path", "filename"):
+            value = image.get(key)
+            if isinstance(value, str) and value.strip():
+                encoded = _base64_from_file(value)
+                if encoded:
+                    return encoded
+        return ""
+
+    if isinstance(image, str):
+        value = image.strip()
+        if not value or value.startswith("<!doctype"):
+            return ""
+        if value.startswith("data:image/"):
+            return _strip_data_url(value)
+        encoded = _base64_from_file(value)
+        if encoded:
+            return encoded
+        if _looks_like_base64(value):
+            return value
+    return ""
+
+
+def _base64_from_file(value: str) -> str:
+    try:
+        path = Path(value)
+        if path.exists() and path.is_file():
+            return base64.b64encode(path.read_bytes()).decode("utf-8")
+    except Exception:
+        return ""
+    return ""
+
+
+def _strip_data_url(value: str) -> str:
+    if "," in value and value.lstrip().startswith("data:image/"):
+        return value.split(",", 1)[1].strip()
+    return value.strip()
+
+
+def _looks_like_base64(value: str) -> bool:
+    clean = value.strip()
+    if len(clean) < 64:
+        return False
+    allowed = set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=\n\r")
+    return all(char in allowed for char in clean)
+
+
+def _forward_nodes_plain_text(nodes: list[dict[str, Any]]) -> str:
+    parts: list[str] = []
+    for node in nodes:
+        for segment in node.get("segments", []):
+            if segment.get("type") == "text":
+                content = str(segment.get("content") or "").strip()
+                if content:
+                    parts.append(content)
+            elif segment.get("type") == "image":
+                parts.append("[图片]")
+    return "\n\n".join(parts)
+
+
+async def _send_forward(
+    ctx: Any,
+    nodes: list[dict[str, Any]],
+    stream_id: Optional[str] = None,
+) -> bool:
+    sender = _get_path(ctx, "send")
+    forward = getattr(sender, "forward", None)
+    target_stream_id = stream_id or _get_stream_id(ctx)
+    if not callable(forward):
+        text = _forward_nodes_plain_text(nodes)
+        text_method = getattr(sender, "text", None) or getattr(sender, "message", None)
+        if callable(text_method):
+            try:
+                sent = await _maybe_await(text_method(text, target_stream_id))
+            except TypeError:
+                sent = await _maybe_await(text_method(text))
+            return bool(sent)
+        _log(ctx, "error", "当前上下文不支持发送转发消息")
+        return False
+
+    if not target_stream_id:
+        _log(ctx, "error", "发送财报失败: 缺少 stream_id")
+        return False
+
+    plain_text = _forward_nodes_plain_text(nodes) or "[今日模型调用财报]"
+    call_specs = (
+        ((nodes, target_stream_id), {"storage_message": False, "processed_plain_text": plain_text}),
+        ((nodes, target_stream_id), {}),
+        ((), {"messages": nodes, "stream_id": target_stream_id, "storage_message": False, "processed_plain_text": plain_text}),
+        ((), {"messages": nodes, "stream_id": target_stream_id}),
+    )
+    for args, kwargs in call_specs:
+        try:
+            sent = await _maybe_await(forward(*args, **kwargs))
+            if not sent:
+                _log(ctx, "error", "发送财报合并转发失败: send.forward 返回 False")
+            return bool(sent)
+        except TypeError:
+            continue
+        except Exception as exc:
+            _log(ctx, "error", f"发送财报合并转发失败: {exc}")
+            return False
+    _log(ctx, "error", "发送财报合并转发失败: send.forward 参数不兼容")
+    return False
+
+
+async def _send_plain_messages(
+    ctx: Any,
+    nodes: list[dict[str, Any]],
+    stream_id: Optional[str] = None,
+) -> bool:
+    sender = _get_path(ctx, "send")
+    target_stream_id = stream_id or _get_stream_id(ctx)
+    if not target_stream_id:
+        _log(ctx, "error", "发送财报失败: 缺少 stream_id")
+        return False
+
+    sent_any = False
+    for node in nodes:
+        for segment in node.get("segments", []):
+            segment_type = segment.get("type")
+            content = str(segment.get("content") or "")
+            if segment_type == "text":
+                sent_any = await _send_text_segment(sender, content, target_stream_id) or sent_any
+            elif segment_type == "image":
+                sent_any = await _send_image_segment(sender, content, target_stream_id) or sent_any
+    return sent_any
+
+
+async def _send_text_segment(sender: Any, content: str, stream_id: str) -> bool:
+    text_method = getattr(sender, "text", None) or getattr(sender, "message", None)
+    if not callable(text_method):
+        return False
+    for args, kwargs in (
+        ((content, stream_id), {}),
+        ((content,), {"stream_id": stream_id}),
+        ((content,), {}),
+    ):
+        try:
+            sent = await _maybe_await(text_method(*args, **kwargs))
+            return bool(sent)
+        except TypeError:
+            continue
+    return False
+
+
+async def _send_command_response(
+    ctx: Any,
+    content: str,
+    stream_id: Optional[str] = None,
+) -> bool:
+    target_stream_id = stream_id or _get_stream_id(ctx)
+    if not target_stream_id:
+        _log(ctx, "warning", f"发送命令回应失败: 缺少 stream_id，回应内容: {content}")
+        return False
+    sender = _get_path(ctx, "send")
+    sent = await _send_text_segment(sender, content, target_stream_id)
+    if not sent:
+        _log(ctx, "warning", f"发送命令回应失败: {content}")
+    return sent
+
+
+async def _send_image_segment(sender: Any, content: str, stream_id: str) -> bool:
+    image_method = getattr(sender, "image", None)
+    if not callable(image_method):
+        return await _send_text_segment(sender, "[图片]", stream_id)
+    for args, kwargs in (
+        ((content, stream_id), {}),
+        ((content,), {"stream_id": stream_id}),
+        ((), {"image_base64": content, "stream_id": stream_id}),
+        ((), {"base64": content, "stream_id": stream_id}),
+        ((), {"content": content, "stream_id": stream_id}),
+        ((content,), {}),
+    ):
+        try:
+            sent = await _maybe_await(image_method(*args, **kwargs))
+            return bool(sent)
+        except TypeError:
+            continue
+    return False
+
+
+async def _try_send_audio(
+    ctx: Any,
+    file_location: str,
+    stream_id: Optional[str] = None,
+) -> None:
+    sender = _get_path(ctx, "send")
+    audio = getattr(sender, "audio", None) or getattr(sender, "voice", None)
+    if callable(audio):
+        target_stream_id = stream_id or _get_stream_id(ctx)
+        try:
+            await _maybe_await(audio(file_location, stream_id=target_stream_id))
+        except TypeError:
+            await _maybe_await(audio(file_location))
+
+
+async def _resolve_target_context(ctx: Any, target: str) -> Any:
+    chat = _get_path(ctx, "chat")
+    for method_name in (
+        "get_stream",
+        "get_context",
+        "get_group_stream_by_group_id",
+        "get_private_stream_by_user_id",
+    ):
+        method = getattr(chat, method_name, None)
+        if callable(method):
+            try:
+                return await _maybe_await(method(target))
+            except Exception:
+                continue
+    return None
+
+
+def _can_query(
+    config: ExpensesSummaryConfig,
+    ctx: Any = None,
+    message: Any = None,
+    kwargs: Optional[dict[str, Any]] = None,
+) -> bool:
+    if not config.permission.query_admin_only:
+        return True
+    return _is_admin(config, ctx, message, kwargs)
+
+
+def _is_admin(
+    config: ExpensesSummaryConfig,
+    ctx: Any = None,
+    message: Any = None,
+    kwargs: Optional[dict[str, Any]] = None,
+) -> bool:
+    user_id = _get_user_id(ctx, message, kwargs)
+    admins = {str(item).strip() for item in (config.permission.admins or []) if str(item).strip()}
+    return bool(user_id and user_id in admins)
+
+
+def _get_user_id(
+    ctx: Any = None,
+    message: Any = None,
+    kwargs: Optional[dict[str, Any]] = None,
+) -> Optional[str]:
+    for obj in (message, kwargs, ctx):
+        for path in (
+            "user_id",
+            "sender.user_id",
+            "sender.id",
+            "sender.qq",
+            "sender_id",
+            "from_user_id",
+            "operator_id",
+            "user_info.user_id",
+            "user_info.qq",
+            "message_info.user_id",
+            "message_info.sender_id",
+            "message_info.platform_user_id",
+            "message_info.sender.user_id",
+            "message_info.user_info.user_id",
+            "event.user_id",
+            "event.sender.user_id",
+            "event.message.user_id",
+            "event.message.sender.user_id",
+            "event.message.message_info.user_id",
+        ):
+            value = _get_path(obj, path)
+            if value:
+                return str(value)
+    return None
+
+
+def _extract_mode_argument(message: Any, kwargs: dict[str, Any]) -> str:
+    for key in ("mode", "arg", "args", "text", "content"):
+        value = kwargs.get(key)
+        if isinstance(value, str) and value.strip():
+            return _last_command_part(value)
+
+    for path in ("matched_groups.mode", "groups.mode", "message.content", "content", "text", "raw_message"):
+        value = _get_path(kwargs, path) or _get_path(message, path)
+        if isinstance(value, str) and value.strip():
+            return _last_command_part(value)
+
+    return ""
+
+
+def _last_command_part(text: str) -> str:
+    parts = text.strip().split()
+    if len(parts) <= 1:
+        return "" if text.strip().startswith("/") else text.strip()
+    return parts[-1]
+
+
+def _is_valid_mode_text(mode: str) -> bool:
+    normalized = (mode or "").strip().lower()
+    return normalized in {
+        "默认",
+        "default",
+        "normal",
+        "麦晨风",
+        "maichenfeng",
+        "mai-chenfeng",
+        "huchenfeng",
+        "fun",
+    }
+
+
+def _normalize_mode(mode: str) -> str:
+    normalized = (mode or "").strip().lower()
+    if normalized in {"麦晨风", "maichenfeng", "mai-chenfeng", "huchenfeng", "fun"}:
+        return REPORT_MODE_MAICHENFENG
+    return REPORT_MODE_DEFAULT
+
+
+def _seconds_until(time_text: str) -> float:
     now = datetime.now()
-    today_zero = now.replace(hour=0,
-                             minute=0,
-                             second=0,
-                             microsecond=0)
-    delta_hours = int((now - today_zero).total_seconds() // 3600)
-    return delta_hours
+    try:
+        hour, minute = [int(part) for part in time_text.split(":", 1)]
+    except ValueError:
+        hour, minute = 23, 30
+    target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if target <= now:
+        target += timedelta(days=1)
+    return max((target - now).total_seconds(), 1)
+
+
+def _iter_items(raw: Any) -> Iterable[Any]:
+    raw = _unwrap_payload(raw)
+    if raw is None:
+        return []
+    if isinstance(raw, dict):
+        for key in ("models", "data", "items", "records", "result"):
+            if isinstance(raw.get(key), list):
+                return raw[key]
+        return [dict({"name": key}, **value) if isinstance(value, dict) else {"name": key, "value": value}
+                for key, value in raw.items()]
+    if isinstance(raw, list):
+        return raw
+    return [raw]
+
+
+def _extract_total(raw: Any, keys: tuple[str, ...]) -> float:
+    series_total = _series_total(raw)
+    if series_total:
+        return series_total
+    total = 0.0
+    for item in _iter_items(raw):
+        total += _pick_number(item, *keys)
+    return total
+
+
+def _series_total(raw: Any, today_only: bool = False) -> float:
+    raw = _unwrap_payload(raw)
+    if raw is None:
+        return 0.0
+    timestamps = _pick(raw, "timestamps", "time_labels", "labels")
+    direct_total = _pick_number(raw, "total")
+    if direct_total and not today_only:
+        return direct_total
+    values_by_key = _pick(raw, "values_by_key", "series", "data_by_key")
+    if isinstance(values_by_key, dict):
+        return sum(
+            _sum_numeric_sequence(values, timestamps=timestamps, today_only=today_only)
+            for values in values_by_key.values()
+        )
+    values = _pick(raw, "values", "data")
+    if isinstance(values, (list, tuple)):
+        return _sum_numeric_sequence(values, timestamps=timestamps, today_only=today_only)
+    return 0.0
+
+
+def _series_values_by_label(raw: Any, today_only: bool = False) -> dict[str, float]:
+    raw = _unwrap_payload(raw)
+    values_by_key = _pick(raw, "values_by_key", "series", "data_by_key")
+    if not isinstance(values_by_key, dict):
+        return {}
+    labels_by_key = _pick(raw, "labels_by_key", "label_by_key", "names_by_key") or {}
+    timestamps = _pick(raw, "timestamps", "time_labels", "labels")
+    result: dict[str, float] = {}
+    for key, values in values_by_key.items():
+        label = str(
+            labels_by_key.get(key)
+            if isinstance(labels_by_key, dict) and labels_by_key.get(key)
+            else key
+        )
+        result[label] = _sum_numeric_sequence(values, timestamps=timestamps, today_only=today_only)
+    return result
+
+
+def _sum_numeric_sequence(
+    values: Any,
+    timestamps: Any = None,
+    today_only: bool = False,
+) -> float:
+    if isinstance(values, dict):
+        total = 0.0
+        for timestamp, item in values.items():
+            if today_only and not _is_today_timestamp(timestamp):
+                continue
+            if isinstance(item, (int, float)):
+                total += float(item)
+            else:
+                total += _pick_number(item, "value", "count", "total", "cost")
+        return total
+    if isinstance(values, (list, tuple)):
+        total = 0.0
+        timestamp_list = timestamps if isinstance(timestamps, (list, tuple)) else None
+        if today_only and timestamp_list is None:
+            return 0.0
+        for index, item in enumerate(values):
+            if today_only and timestamp_list is not None and not _is_today_timestamp(timestamp_list[index] if index < len(timestamp_list) else None):
+                continue
+            if isinstance(item, (int, float)):
+                total += float(item)
+            else:
+                total += _pick_number(item, "value", "count", "total", "cost")
+        return total
+    if today_only and timestamps is not None and not _is_today_timestamp(timestamps):
+        return 0.0
+    try:
+        return float(values or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _is_today_timestamp(value: Any) -> bool:
+    parsed = _parse_timestamp(value)
+    if parsed is None:
+        return False
+    return parsed.date() == date.today()
+
+
+def _parse_timestamp(value: Any) -> Optional[datetime]:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, date):
+        return datetime.combine(value, datetime.min.time())
+    if isinstance(value, (int, float)):
+        timestamp = float(value)
+        if timestamp > 10_000_000_000:
+            timestamp /= 1000
+        try:
+            return datetime.fromtimestamp(timestamp)
+        except (OSError, OverflowError, ValueError):
+            return None
+    text = str(value).strip()
+    if not text:
+        return None
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d", "%Y/%m/%d %H:%M:%S", "%Y/%m/%d"):
+        try:
+            return datetime.strptime(text, fmt)
+        except ValueError:
+            pass
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00")).replace(tzinfo=None)
+    except ValueError:
+        return None
+
+
+def _pick(item: Any, *keys: str, default: Any = None) -> Any:
+    item = _unwrap_payload(item)
+    for key in keys:
+        if isinstance(item, dict) and key in item:
+            return item[key]
+        if hasattr(item, key):
+            return getattr(item, key)
+    return default
+
+
+def _unwrap_payload(raw: Any) -> Any:
+    current = raw
+    seen = 0
+    while isinstance(current, dict) and seen < 4:
+        seen += 1
+        if any(key in current for key in (
+            "values_by_key",
+            "items",
+            "models",
+            "records",
+            "timestamps",
+            "total",
+        )):
+            return current
+        for key in ("data", "result", "payload"):
+            value = current.get(key)
+            if isinstance(value, (dict, list)):
+                current = value
+                break
+        else:
+            return current
+    return current
+
+
+def _pick_number(item: Any, *keys: str) -> float:
+    value = _pick(item, *keys, default=0)
+    try:
+        return float(value or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _call_first(target: Any, names: list[str], *args: Any, **kwargs: Any) -> Any:
+    for name in names:
+        method = getattr(target, name, None)
+        if callable(method):
+            try:
+                return method(*args, **kwargs)
+            except TypeError:
+                return method()
+    return None
+
+
+def _first_present(*values: Any) -> Any:
+    for value in values:
+        if value is not None and value != "":
+            return value
+    return None
+
+
+def _get_stream_id(obj: Any) -> Optional[str]:
+    for path in (
+        "stream_id",
+        "session_id",
+        "chat_id",
+        "chat_stream.stream_id",
+        "message.stream_id",
+        "message.session_id",
+        "message.chat_id",
+        "message.chat_stream.stream_id",
+        "message.message_info.stream_id",
+        "message.message_info.session_id",
+        "message.message_info.chat_id",
+        "event.stream_id",
+        "event.session_id",
+        "event.chat_id",
+        "event.chat_stream.stream_id",
+        "event.message.stream_id",
+        "event.message.session_id",
+        "event.message.chat_id",
+        "event.message.chat_stream.stream_id",
+        "event.message.message_info.stream_id",
+        "event.message.message_info.session_id",
+        "event.message.message_info.chat_id",
+        "context.stream_id",
+        "context.session_id",
+        "context.chat_id",
+        "ctx.stream_id",
+        "ctx.session_id",
+        "ctx.chat_id",
+    ):
+        value = _get_path(obj, path)
+        if value:
+            return str(value)
+    return None
+
+
+def _get_path(obj: Any, path: str) -> Any:
+    current = obj
+    for part in path.split("."):
+        if isinstance(current, dict):
+            current = current.get(part)
+        else:
+            current = getattr(current, part, None)
+        if current is None:
+            return None
+    return current
+
+
+async def _maybe_await(value: Any) -> Any:
+    if hasattr(value, "__await__"):
+        return await value
+    return value
+
+
+def _log(ctx: Any, level: str, message: str) -> None:
+    logger = getattr(ctx, "logger", None)
+    method = getattr(logger, level, None)
+    if callable(method):
+        method(message)
+
+
+def create_plugin() -> ExpensesSummaryPlugin:
+    return ExpensesSummaryPlugin()

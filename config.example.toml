@@ -1,0 +1,50 @@
+[plugin]
+# 配置文件版本，请勿随意修改。
+config_version = "1.0.0"
+
+[report]
+# 财报模式。可填：default、默认、maichenfeng、麦晨风。
+mode = "default"
+# 默认模式图片标题。
+title = "今日模型调用财报"
+# 麦晨风模式生成地点、“我去了……”和诗句时使用的模型任务名。小名严格使用 fallback.xiao_names。
+llm_task = "utils"
+# 是否使用合并转发消息发送财报。false 时会按普通消息逐条发送。
+use_forward_message = true
+# 默认模式下第一条文本内容。可使用 {date} 作为当天日期占位符。
+default_opening = "{date}模型调用财报已生成，以下是今日请求次数、回复量与模型成本汇总。"
+
+[permission]
+# 是否仅允许管理员使用 /expenses 和 /今日财报 查询命令。
+query_admin_only = false
+# 管理员 QQ 号列表。/财报模式 和 /expensesmode 始终仅管理员可用。
+admins = []
+
+[scheduler]
+# 是否启用定时发送。
+enabled = false
+# 定时发送时间，格式 HH:MM。
+time = "23:30"
+# 定时发送群号列表。
+group_ids = []
+# 定时发送私聊 QQ 列表。
+private_ids = []
+
+[fallback]
+# 麦晨风模式随机小名候选。插件只会从这里取小名，不会让 LLM 生成小名。
+xiao_names = ["小麦"]
+# 麦晨风模式随机地点候选。
+locations = ["KFC", "卧室", "广州塔", "下水道"]
+# 麦晨风模式随机诗句候选。
+poems = [
+  "How do you do, you like me and I like you.",
+  "Shut up! I read this inside the book I read before."
+]
+# 麦晨风模式感谢名单。
+thanks_list = ["810", "艾斯比"]
+
+[audio]
+# 是否在发送财报后额外发送 BGM 音频。
+enabled = false
+# 音频文件路径。
+file_location = "audio.mp3"

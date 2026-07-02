@@ -1,43 +1,46 @@
 {
-  "manifest_version": 1,
-  "name": "麦晨风财务总结插件(Expenses Summary)",
+  "manifest_version": 2,
+  "id": "davidblackcn.maibot-expenses-summary-plugin",
+  "name": "麦麦财务总结插件",
   "version": "1.0.0",
-  "description": "生成今日财务总结，让麦晨风成为你的财务小助手。",
+  "description": "统计当天模型调用次数和花费，并以默认或麦晨风模式生成转发消息财报。",
   "author": {
-    "name": "Kmaj",
-    "url": "https://github.com/Kmaj1st"
+    "name": "DavidBlackCN",
+    "url": "https://github.com/DavidBlackCN"
   },
-  "license": "GPL-v3.0-or-later",
-  
+  "license": "MIT",
   "host_application": {
-    "min_version": "0.11.5"
+    "min_version": "1.0.0",
+    "max_version": "1.99.99"
   },
-  "homepage_url": "https://github.com/Kmaj1st/expenses_summary",
-  "repository_url": "https://github.com/Kmaj1st/expenses_summary",
-  "keywords": ["Expenses", "Summary", "Costs", "Finance"],
-  "categories": ["Summary", "Expenses", "Costs", "HuChenFeng", "Message"],
-  
-  "default_locale": "zh-CN",
-  "locales_path": "_locales",
-  
-  "plugin_info": {
-    "is_built_in": false,
-    "plugin_type": "general",
-    "components": [
-      {
-        "type": "action",
-        "name": "generate_expenses_summary",
-        "description": "生成今日财务总结"
-      },
-      {
-        "type": "command",
-        "name": "expenses",
-        "description": "生成今日财务总结",
-        "pattern": "/expenses"
-      }
-    ],
-    "features": [
-      "生成今日财务总结"
-    ]
+  "sdk": {
+    "min_version": "2.0.0",
+    "max_version": "2.99.99"
+  },
+  "urls": {
+    "homepage": "https://github.com/DavidBlackCN/maibot-expenses-summary-plugin",
+    "repository": "https://github.com/DavidBlackCN/maibot-expenses-summary-plugin"
+  },
+  "capabilities": [
+    "send.forward",
+    "send.text",
+    "send.image",
+    "send.audio",
+    "render.html2png",
+    "llm.generate",
+    "statistics",
+    "statistics.local",
+    "statistics.local.models",
+    "statistics.local.model_trend",
+    "statistics.local.message_trend"
+  ],
+  "display": {
+    "icon": {
+      "type": "emoji",
+      "value": "💸"
+    }
+  },
+  "i18n": {
+    "default_locale": "zh-CN"
   }
 }
