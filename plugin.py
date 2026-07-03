@@ -1188,23 +1188,6 @@ async def _resolve_target_stream_id(ctx: Any, chat_type: str, target_id: str) ->
     return None
 
 
-async def _resolve_target_context(ctx: Any, target: str) -> Any:
-    chat = _get_path(ctx, "chat")
-    for method_name in (
-        "get_stream",
-        "get_context",
-        "get_stream_by_group_id",
-        "get_stream_by_user_id",
-    ):
-        method = getattr(chat, method_name, None)
-        if callable(method):
-            try:
-                return await _maybe_await(method(target))
-            except Exception:
-                continue
-    return None
-
-
 def _can_query(
     config: ExpensesSummaryConfig,
     ctx: Any = None,
