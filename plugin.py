@@ -1,5 +1,5 @@
 """
-MaiBot 1.0.1 / sdk2.x expenses summary plugin.
+MaiBot 1.0.2 / sdk2.x expenses summary plugin.
 """
 
 from __future__ import annotations
@@ -112,7 +112,7 @@ class FallbackConfig(PluginConfigBase):
     thanks_list: list[str] = Field(default=["810", "艾斯比"], title="感谢名单")
 
 
-# BGM support is temporarily disabled in 1.0.1 because the current sdk2.x
+# BGM support is temporarily disabled since 1.0.1 because the current sdk2.x
 # public send capability does not expose send.audio.
 # class AudioConfig(PluginConfigBase):
 #     enabled: bool = Field(default=False, title="启用 BGM 音频")
@@ -120,7 +120,7 @@ class FallbackConfig(PluginConfigBase):
 
 
 class PluginMetaConfig(PluginConfigBase):
-    config_version: str = Field(default="1.0.1", title="配置文件版本")
+    config_version: str = Field(default="1.0.2", title="配置文件版本")
 
 
 class ExpensesSummaryConfig(PluginConfigBase):
@@ -146,6 +146,7 @@ class ExpensesSummaryPlugin(MaiBotPlugin):
         config = self._get_config()
         if config.scheduler.enabled:
             self._scheduler_task = asyncio.create_task(self._scheduler_loop())
+            _log(self.ctx, "info", f"定时财报已启用，将在每天 {config.scheduler.time} 发送")
 
     async def on_unload(self) -> None:
         if self._scheduler_task:
@@ -287,14 +288,28 @@ class ExpensesSummaryPlugin(MaiBotPlugin):
 
     async def _send_scheduled_reports(self) -> None:
         config = self._get_config()
-        targets = list(config.scheduler.group_ids) + list(config.scheduler.private_ids)
-        if not targets:
+        group_ids = _config_list(config.scheduler.group_ids)
+        private_ids = _config_list(config.scheduler.private_ids)
+        if not group_ids and not private_ids:
             _log(self.ctx, "warning", "定时财报已启用，但没有配置目标群聊或私聊")
             return
-        for target in targets:
-            target_ctx = await _resolve_target_context(self.ctx, target)
-            if target_ctx:
-                await self._send_report(target_ctx, _get_stream_id(target_ctx))
+
+        for group_id in group_ids:
+            await self._send_scheduled_target("group", group_id)
+        for user_id in private_ids:
+            await self._send_scheduled_target("private", user_id)
+
+    async def _send_scheduled_target(self, chat_type: str, target_id: str) -> None:
+        stream_id = await _resolve_target_stream_id(self.ctx, chat_type, target_id)
+        if not stream_id:
+            _log(self.ctx, "error", f"定时发送财报失败: 无法解析 {chat_type} 目标 {target_id} 的 stream_id")
+            return
+
+        sent = await self._send_report(self.ctx, stream_id)
+        if sent:
+            _log(self.ctx, "info", f"定时财报已发送到 {chat_type} 目标 {target_id}")
+        else:
+            _log(self.ctx, "error", f"定时发送财报失败: {chat_type} 目标 {target_id} 发送返回失败")
 
     def _get_config(self) -> ExpensesSummaryConfig:
         try:
@@ -1125,13 +1140,61 @@ async def _send_image_segment(sender: Any, content: str, stream_id: str) -> bool
 #             await _maybe_await(audio(file_location))
 
 
+async def _resolve_target_stream_id(ctx: Any, chat_type: str, target_id: str) -> Optional[str]:
+    chat = _get_path(ctx, "chat")
+    if chat is None:
+        _log(ctx, "error", "定时发送财报失败: ctx.chat 不可用")
+        return None
+
+    method_names = (
+        ("get_stream_by_group_id", "get_group_stream_by_group_id")
+        if chat_type == "group"
+        else ("get_stream_by_user_id", "get_private_stream_by_user_id")
+    )
+    for method_name in method_names:
+        method = getattr(chat, method_name, None)
+        if callable(method):
+            try:
+                stream = await _maybe_await(method(target_id, platform="qq"))
+            except TypeError:
+                try:
+                    stream = await _maybe_await(method(target_id))
+                except Exception as exc:
+                    _log(ctx, "warning", f"解析定时财报目标失败: {method_name}({target_id}) 返回异常: {exc}")
+                    continue
+            except Exception as exc:
+                _log(ctx, "warning", f"解析定时财报目标失败: {method_name}({target_id}) 返回异常: {exc}")
+                continue
+
+            stream_id = _stream_id_from_result(stream)
+            if stream_id:
+                return stream_id
+
+    open_session = getattr(chat, "open_session", None)
+    if callable(open_session):
+        kwargs = {"platform": "qq", "chat_type": chat_type}
+        if chat_type == "group":
+            kwargs["group_id"] = target_id
+        else:
+            kwargs["user_id"] = target_id
+        try:
+            stream = await _maybe_await(open_session(**kwargs))
+            stream_id = _stream_id_from_result(stream)
+            if stream_id:
+                return stream_id
+        except Exception as exc:
+            _log(ctx, "warning", f"打开定时财报目标会话失败: {chat_type} {target_id}: {exc}")
+
+    return None
+
+
 async def _resolve_target_context(ctx: Any, target: str) -> Any:
     chat = _get_path(ctx, "chat")
     for method_name in (
         "get_stream",
         "get_context",
-        "get_group_stream_by_group_id",
-        "get_private_stream_by_user_id",
+        "get_stream_by_group_id",
+        "get_stream_by_user_id",
     ):
         method = getattr(chat, method_name, None)
         if callable(method):
@@ -1443,6 +1506,38 @@ def _first_present(*values: Any) -> Any:
     for value in values:
         if value is not None and value != "":
             return value
+    return None
+
+
+def _config_list(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, (str, int)):
+        items = [value]
+    else:
+        try:
+            items = list(value)
+        except TypeError:
+            items = [value]
+    return [str(item).strip() for item in items if str(item).strip()]
+
+
+def _stream_id_from_result(value: Any) -> Optional[str]:
+    if isinstance(value, (str, int)) and str(value).strip():
+        return str(value).strip()
+    stream_id = _get_stream_id(value)
+    if stream_id:
+        return stream_id
+    for path in (
+        "data.stream_id",
+        "result.stream_id",
+        "payload.stream_id",
+        "stream.stream_id",
+        "chat_stream.stream_id",
+    ):
+        candidate = _get_path(value, path)
+        if candidate:
+            return str(candidate)
     return None
 
 

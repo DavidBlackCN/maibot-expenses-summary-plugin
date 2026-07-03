@@ -1,6 +1,6 @@
 [plugin]
 # 配置文件版本，请勿随意修改。
-config_version = "1.0.1"
+config_version = "1.0.2"
 
 [report]
 # 财报模式。可填：default、默认、maichenfeng、麦晨风。
@@ -43,4 +43,4 @@ poems = [
 # 麦晨风模式感谢名单。
 thanks_list = ["810", "艾斯比"]
 
-# BGM 音频功能在 1.0.1 暂停启用：当前 sdk2.x 暂未提供 send.audio 能力。
+# BGM 音频功能自 1.0.1 起暂停启用：当前 sdk2.x 暂未提供 send.audio 能力。

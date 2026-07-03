@@ -56,7 +56,7 @@
 
 ```toml
 [plugin]
-config_version = "1.0.1"
+config_version = "1.0.2"
 
 [report]
 mode = "default"
@@ -84,7 +84,7 @@ poems = [
 ]
 thanks_list = ["810", "艾斯比"]
 
-# BGM 音频功能在 1.0.1 暂停启用：当前 sdk2.x 暂未提供 send.audio 能力。
+# BGM 音频功能自 1.0.1 起暂停启用：当前 sdk2.x 暂未提供 send.audio 能力。
 ```
 
 `report.use_forward_message = true` 时使用合并转发消息发送；设为 `false` 时会按普通消息逐条发送文本和图片。
@@ -92,6 +92,8 @@ thanks_list = ["810", "艾斯比"]
 `report.llm_task` 用于配置麦晨风模式生成地点、“我去了……”和诗句时使用的任务名，插件会通过 SDK 公共接口 `ctx.llm.generate(..., model=report.llm_task)` 调用，默认使用 `utils`。小名不会交给 LLM 生成，只会从 `fallback.xiao_names` 中选择。
 
 `permission.query_admin_only = true` 时，`/expenses` 和 `/今日财报` 仅管理员可用；模式切换命令始终仅管理员可用。
+
+`scheduler.enabled = true` 时会按 `scheduler.time` 每天定时发送。`scheduler.group_ids` 填 QQ 群号，`scheduler.private_ids` 填私聊 QQ 号，插件会通过 `ctx.chat.get_stream_by_group_id()` / `ctx.chat.get_stream_by_user_id()` 解析目标会话后发送。
 
 ## Tool
 
@@ -111,6 +113,11 @@ thanks_list = ["810", "艾斯比"]
 统计口径：MaiBot 统计 API 的 `days` 参数表示最近 N 天数据；插件会使用小时粒度趋势数据，并按本地日期过滤为当天 0 点至当前时间，避免新的一天继续计入前一日的 24H 数据。
 
 ## 更新日志
+
+### 1.0.2
+
+- 精简 manifest 统计能力声明，移除顶层 `statistics` 和 `statistics.local`，仅保留实际使用的方法级能力。
+- 修复定时发送目标解析逻辑，按 QQ 群号/QQ 号解析会话后发送定时财报。
 
 ### 1.0.1
 
